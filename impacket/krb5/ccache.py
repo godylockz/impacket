@@ -535,9 +535,7 @@ class CCache:
         # (Section 5.4.2)
         plainText = cipher.decrypt(oldSessionKey, 3, cipherText)
 
-        # MIT krb5 also uses the EncTGSRepPart tag for AS-REP encrypted data.
-        encPartSpec = EncTGSRepPart() if plainText[:1] == b'\x7a' else EncASRepPart()
-        encASRepPart = decoder.decode(plainText, asn1Spec=encPartSpec)[0]
+        encASRepPart = decoder.decode(plainText, asn1Spec = EncASRepPart())[0]
         credential = Credential()
         server = types.Principal()
         server.from_asn1(encASRepPart, 'srealm', 'sname')
@@ -555,8 +553,7 @@ class CCache:
 
         credential['time'] = Times()
         credential['time']['authtime'] = self.toTimeStamp(types.KerberosTime.from_asn1(encASRepPart['authtime']))
-        starttime = encASRepPart['starttime'] if encASRepPart['starttime'].hasValue() else encASRepPart['authtime']
-        credential['time']['starttime'] = self.toTimeStamp(types.KerberosTime.from_asn1(starttime))
+        credential['time']['starttime'] = self.toTimeStamp(types.KerberosTime.from_asn1(encASRepPart['starttime']))
         credential['time']['endtime'] = self.toTimeStamp(types.KerberosTime.from_asn1(encASRepPart['endtime']))
         # After KB4586793 for CVE-2020-17049 this timestamp may be omitted
         if encASRepPart['renew-till'].hasValue():
@@ -617,8 +614,7 @@ class CCache:
 
         credential['time'] = Times()
         credential['time']['authtime'] = self.toTimeStamp(types.KerberosTime.from_asn1(encTGSRepPart['authtime']))
-        starttime = encTGSRepPart['starttime'] if encTGSRepPart['starttime'].hasValue() else encTGSRepPart['authtime']
-        credential['time']['starttime'] = self.toTimeStamp(types.KerberosTime.from_asn1(starttime))
+        credential['time']['starttime'] = self.toTimeStamp(types.KerberosTime.from_asn1(encTGSRepPart['starttime']))
         credential['time']['endtime'] = self.toTimeStamp(types.KerberosTime.from_asn1(encTGSRepPart['endtime']))
         # After KB4586793 for CVE-2020-17049 this timestamp may be omitted
         if encTGSRepPart['renew-till'].hasValue():
@@ -652,23 +648,19 @@ class CCache:
         except FileNotFoundError as e:
             raise e
 
-    def saveFile(self, fileName, chmod=None):
+    def saveFile(self, fileName):
         f = open(fileName, 'wb+')
         f.write(self.getData())
         f.close()
-        if chmod is not None:
-            os.chmod(fileName, chmod)
 
     @classmethod
-    def parseFile(cls, domain='', username='', target='', anySPN=True):
+    def parseFile(cls, domain='', username='', target=''):
         """
         parses the CCache file specified in the KRB5CCNAME environment variable
 
         :param domain: an optional domain name of a user
         :param username: an optional username of a user
         :param target: an optional SPN of a target system
-        :param anySPN: whether a ticket for another service on the same host can
-                       satisfy the target lookup
 
         :return: domain, username, TGT, TGS
         """
@@ -686,15 +678,15 @@ class CCache:
         creds = None
         if target != '':
             principal = '%s@%s' % (target.upper(), domain.upper())
-            creds = ccache.getCredential(principal, anySPN=anySPN)
+            creds = ccache.getCredential(principal)
 
         TGT = None
         TGS = None
         if creds is None:
             principal = 'krbtgt/%s@%s' % (domain.upper(), domain.upper())
-            creds = ccache.getCredential(principal, anySPN=anySPN)
+            creds = ccache.getCredential(principal)
             if creds is None:
-                targetHost = target.split('/')[-1].split('@')[0]
+                targetHost = target.split('/')[-1].split('@')[0].split(':', 1)[0]
                 # the target's DNS suffix is only a hint, used to choose between several referral TGTs
                 targetRealm = targetHost.split('.', 1)[1] if '.' in targetHost else None
                 creds = ccache.getInterRealmTGT(domain, targetRealm)

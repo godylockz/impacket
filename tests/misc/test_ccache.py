@@ -118,41 +118,6 @@ class CCACHETests(unittest.TestCase):
                 self.assertIsNone(TGS)
                 self.assertIsNotNone(TGT)
 
-    @pytest.mark.skipif(PY2, reason="requires python 3.3 or higher")
-    def test_ccache_parseFile_can_require_exact_spn(self):
-        if not PY2:
-            ccache = mock.Mock()
-            tgt_credential = mock.Mock()
-            tgt = object()
-            tgt_credential.toTGT.return_value = tgt
-            ccache.getCredential.side_effect = [None, tgt_credential]
-
-            with mock.patch.object(CCache, "loadFile", return_value=ccache):
-                domain, username, TGT, TGS = CCache.parseFile(
-                    self.domain,
-                    self.username,
-                    "cifs/server.innovation.rocks",
-                    anySPN=False,
-                )
-
-            self.assertEqual(domain, self.domain)
-            self.assertEqual(username, self.username)
-            self.assertIs(TGT, tgt)
-            self.assertIsNone(TGS)
-            self.assertEqual(
-                ccache.getCredential.call_args_list,
-                [
-                    mock.call(
-                        "CIFS/SERVER.INNOVATION.ROCKS@INNOVATION.ROCKS",
-                        anySPN=False,
-                    ),
-                    mock.call(
-                        "krbtgt/INNOVATION.ROCKS@INNOVATION.ROCKS",
-                        anySPN=False,
-                    ),
-                ],
-            )
-
     def test_credential_with_authdata_roundtrip(self):
         # Regression test for a credential that carries authorization data.
         # Credential.authData started as a tuple and was never turned into a
@@ -196,6 +161,58 @@ class CCACHETests(unittest.TestCase):
         # Same short hostname, different child domain -> must not match
         self.assertIsNone(ccache.getCredential("LDAP/DC01.CHILD-B.LOCAL/CHILD-B.LOCAL@{}".format(realm)))
 
+    def test_ccache_getCredential_two_part_spn_short_fqdn_matching(self):
+        realm = "EXAMPLE.TEST"
+
+        cases = (
+            (
+                "HOST/FILESERVER@{}".format(realm),
+                "CIFS/FILESERVER.EXAMPLE.TEST@{}".format(realm),
+            ),
+            (
+                "HOST/FILESERVER.EXAMPLE.TEST@{}".format(realm),
+                "CIFS/FILESERVER@{}".format(realm),
+            ),
+            (
+                "HOST/FILESERVER@{}".format(realm),
+                "CIFS/FILESERVER.EXAMPLE.TEST:445@{}".format(realm),
+            ),
+        )
+
+        for cached_spn, requested_spn in cases:
+            with self.subTest(cached_spn=cached_spn, requested_spn=requested_spn):
+                ccache = self._ccache_with(cached_spn)
+                credential = ccache.credentials[0]
+                self.assertIs(ccache.getCredential(requested_spn), credential)
+
+    def test_ccache_getCredential_two_part_spn_matching_boundaries(self):
+        realm = "FOREST.LOCAL"
+        cached_spn = "HOST/SERVER.CHILD-A.LOCAL@{}".format(realm)
+        ccache = self._ccache_with(cached_spn)
+        credential = ccache.credentials[0]
+
+        # Relaxed matching must remain bounded by the Kerberos realm.
+        self.assertIsNone(
+            ccache.getCredential("CIFS/SERVER.CHILD-A.LOCAL@OTHER.LOCAL")
+        )
+
+        # Two qualified names must not match only because their first DNS
+        # label is the same.
+        self.assertIsNone(
+            ccache.getCredential("CIFS/SERVER.CHILD-B.LOCAL@{}".format(realm))
+        )
+
+        # Disabling AnySPN must retain exact service and hostname matching.
+        self.assertIsNone(
+            ccache.getCredential(
+                "CIFS/SERVER@{}".format(realm),
+                anySPN=False,
+            )
+        )
+
+        # The negative lookups above must not alter the cached credential.
+        self.assertIs(ccache.getCredential(cached_spn, anySPN=False), credential)
+
     @staticmethod
     def _ccache_with(*spns):
         ccache = CCache()
@@ -230,6 +247,42 @@ class CCACHETests(unittest.TestCase):
             # Without a usable hint the choice must still be stable, not cache-order dependent
             self.assertEqual(ccache.getInterRealmTGT(self.domain)["server"].prettyPrint(),
                              ccache.getInterRealmTGT(self.domain, "UNKNOWN.LOCAL")["server"].prettyPrint())
+
+    def test_ccache_parseFile_referral_with_port_or_instance(self):
+        preferred = "krbtgt/FOREST.LOCAL@{}".format(self.domain)
+        spns = [preferred, "krbtgt/CHILD-A.LOCAL@{}".format(self.domain)]
+
+        for order in (spns, list(reversed(spns))):
+            ccache = self._ccache_with(*order)
+            # Exercise cache selection; ticket conversion is independent of the SPN hint.
+            with mock.patch.object(CCache, "loadFile", return_value=ccache), \
+                    mock.patch.object(Credential, "toTGT", autospec=True,
+                                      return_value=mock.sentinel.tgt) as to_tgt:
+                for suffix in ("", ":1433", ":SQLEXPRESS"):
+                    with self.subTest(order=order, suffix=suffix):
+                        to_tgt.reset_mock()
+                        _, _, TGT, TGS = CCache.parseFile(
+                            self.domain, self.username, "MSSQLSvc/sql.forest.local" + suffix)
+
+                        self.assertIs(TGT, mock.sentinel.tgt)
+                        self.assertIsNone(TGS)
+                        to_tgt.assert_called_once()
+                        self.assertEqual(to_tgt.call_args[0][0]["server"].prettyPrint(),
+                                         preferred.encode())
+
+    def test_ccache_parseFile_service_ticket_preserves_port(self):
+        target = "MSSQLSvc/sql.{}:1433".format(self.domain.lower())
+        principal = "{}@{}".format(target.upper(), self.domain)
+        ccache = self._ccache_with(principal)
+
+        with mock.patch.object(CCache, "loadFile", return_value=ccache), \
+                mock.patch.object(Credential, "toTGS", autospec=True,
+                                  return_value=mock.sentinel.tgs) as to_tgs:
+            _, _, TGT, TGS = CCache.parseFile(self.domain, self.username, target)
+
+        self.assertIsNone(TGT)
+        self.assertIs(TGS, mock.sentinel.tgs)
+        to_tgs.assert_called_once_with(ccache.credentials[0], principal)
 
 
 if __name__ == "__main__":
