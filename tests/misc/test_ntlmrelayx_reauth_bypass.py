@@ -1,4 +1,5 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
+# -- coding: utf-8 --
 # Impacket - Collection of Python classes for working with network protocols.
 #
 # Copyright Fortra, LLC and its affiliated companies
@@ -26,7 +27,7 @@ from impacket.examples.ntlmrelayx.clients import ldaprelayclient
 from impacket.examples.ntlmrelayx.clients.ldaprelayclient import LDAPRelayClient
 from impacket.examples.ntlmrelayx.utils.config import NTLMRelayxConfig
 from impacket.ldap.ldap import LDAPSessionError
-from impacket.ldap.ldapasn1 import BindResponse, LDAPMessage, ModifyResponse, PartialAttribute, \
+from impacket.ldap.ldapasn1 import AddResponse, BindResponse, LDAPMessage, ModifyResponse, PartialAttribute, \
     ResultCode, SearchResultEntry
 from impacket.ntlm import NTLMAuthChallengeResponse, NTLMSSP_NEGOTIATE_UNICODE
 from impacket.smb3 import SMB2Negotiate_Response, SMB2Packet, SMB3Packet, SMB2_DIALECT_30, \
@@ -181,11 +182,12 @@ class ReauthBypassLDAPClientTests(unittest.TestCase):
 
     @staticmethod
     def ldapClient(delegate_access=False, shadow_creds=False, escalate_user=None, sid=False,
-                   shadow_outfile=None, shadow_replace=False, backup_path=None, delegate_target=None):
+                   shadow_outfile=None, shadow_replace=False, backup_path=None, delegate_target=None,
+                   add_computer=None):
         config = NTLMRelayxConfig()
         config.setReauthBypassOptions('AD.LOCAL/low:Passw0rd1', None)
         # The LDAP bypass reads the standard LDAP attack options, same as a normal relay
-        config.setLDAPOptions(True, True, True, True, escalate_user, None, delegate_access,
+        config.setLDAPOptions(True, True, True, True, escalate_user, add_computer, delegate_access,
                               False, False, False, sid, None, False, delegatetarget=delegate_target)
         config.setIsShadowCredentialsAttack(shadow_creds)
         config.setShadowCredentialsOptions(None, None, None, shadow_outfile, shadow_replace, backup_path)
@@ -218,8 +220,29 @@ class ReauthBypassLDAPClientTests(unittest.TestCase):
     def test_selected_attack_picks_the_single_write(self):
         self.assertEqual(self.ldapClient(delegate_access=True).bypassSelectedAttack(), 'rbcd')
         self.assertEqual(self.ldapClient(shadow_creds=True).bypassSelectedAttack(), 'shadow')
+        self.assertEqual(self.ldapClient(add_computer=['NEWPC$', 'Passw0rd1!']).bypassSelectedAttack(),
+                         'addcomputer')
         self.assertIsNone(self.ldapClient().bypassSelectedAttack())
         self.assertIsNone(self.ldapClient(delegate_access=True, shadow_creds=True).bypassSelectedAttack())
+
+    def test_add_computer_request_contains_complete_machine_account(self):
+        client = self.ldapClient(add_computer=['NEWPC', 'Passw0rd1!'])
+
+        attribute, values, operation = client.bypassBuildWrite()
+        wire = LDAPRelayClient.ldapMessage(client.bypassBuildAddRequest(), 2)
+        message, _ = decoder.decode(wire, asn1Spec=LDAPMessage())
+        add = message['protocolOp']['addRequest']
+        attributes = {
+            str(item['type']): [bytes(value) for value in item['vals']]
+            for item in add['attributes']
+        }
+
+        self.assertEqual((attribute, values, operation), ('ADD_COMPUTER', None, None))
+        self.assertEqual(str(add['entry']), 'CN=NEWPC,CN=Computers,DC=ad,DC=local')
+        self.assertEqual(attributes['sAMAccountName'], [b'NEWPC$'])
+        self.assertEqual(attributes['dnsHostName'], [b'NEWPC.ad.local'])
+        self.assertIn(b'HOST/NEWPC.ad.local', attributes['servicePrincipalName'])
+        self.assertEqual(attributes['unicodePwd'], ['"Passw0rd1!"'.encode('utf-16-le')])
 
     def test_delegate_target_is_stored(self):
         client = self.ldapClient(delegate_access=True, escalate_user='S-1-5-21-1-2-3-1104', sid=True,
@@ -333,6 +356,15 @@ class ReauthBypassLDAPClientTests(unittest.TestCase):
         self.recordStream(client,
                           self.resultMessage(BindResponse(), 'success', 1),
                           self.resultMessage(ModifyResponse(), 'success', 2))
+
+        self.assertTrue(client.readInRecordResponses())
+
+    def test_in_record_responses_report_an_accepted_add(self):
+        client = self.ldapClient(add_computer=['NEWPC$', 'Passw0rd1!'])
+        client._isAddOperation = True
+        self.recordStream(client,
+                          self.resultMessage(BindResponse(), 'success', 1),
+                          self.resultMessage(AddResponse(), 'success', 2))
 
         self.assertTrue(client.readInRecordResponses())
 
