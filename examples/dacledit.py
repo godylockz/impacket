@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 # Impacket - Collection of Python classes for working with network protocols.
 #
-# Copyright (C) 2024 Fortra. All rights reserved.
+# Copyright Fortra, LLC and its affiliated companies 
+#
+# All rights reserved.
 #
 # This software is provided under a slightly modified version
 # of the Apache Software License. See the accompanying LICENSE file
@@ -26,22 +28,18 @@ import sys
 import traceback
 import datetime
 
-import ldap3
-import ssl
-import ldapdomaindump
-from binascii import unhexlify
 from enum import Enum
-from ldap3.protocol.formatters.formatters import format_sid
 
 from impacket import version
 from impacket.examples import logger, utils
-from impacket.ldap import ldaptypes
+from impacket.ldap import ldap, ldapasn1, ldaptypes
+from impacket.ldap.ldap import escape_filter_chars, get_entry_dn, get_entry_value, get_entry_values
 from impacket.msada_guids import SCHEMA_OBJECTS, EXTENDED_RIGHTS
-from impacket.smbconnection import SMBConnection
-from impacket.spnego import SPNEGO_NegTokenInit, TypesMech
-from ldap3.utils.conv import escape_filter_chars
-from ldap3.protocol.microsoft import security_descriptor_control
 from impacket.uuid import string_to_bin, bin_to_string
+
+from impacket.examples.utils import (ldap_login, parse_identity,
+                                      ldap_value_to_bytes, as_string, as_sid_string,
+                                      search_entries, log_ldap_error)
 
 OBJECT_TYPES_GUID = {}
 OBJECT_TYPES_GUID.update(SCHEMA_OBJECTS)
@@ -96,7 +94,7 @@ WELL_KNOWN_SIDS = {
     'S-1-5-64-14': 'SChannel Authentication',
     'S-1-5-64-21': 'Digest Authority',
     'S-1-5-80': 'NT Service',
-    'S-1-5-83-0': 'NT VIRTUAL MACHINE\Virtual Machines',
+    'S-1-5-83-0': 'NT VIRTUAL MACHINE\\Virtual Machines',
     'S-1-16-0': 'Untrusted Mandatory Level',
     'S-1-16-4096': 'Low Mandatory Level',
     'S-1-16-8192': 'Medium Mandatory Level',
@@ -105,24 +103,24 @@ WELL_KNOWN_SIDS = {
     'S-1-16-16384': 'System Mandatory Level',
     'S-1-16-20480': 'Protected Process Mandatory Level',
     'S-1-16-28672': 'Secure Process Mandatory Level',
-    'S-1-5-32-554': 'BUILTIN\Pre-Windows 2000 Compatible Access',
-    'S-1-5-32-555': 'BUILTIN\Remote Desktop Users',
-    'S-1-5-32-557': 'BUILTIN\Incoming Forest Trust Builders',
+    'S-1-5-32-554': 'BUILTIN\\Pre-Windows 2000 Compatible Access',
+    'S-1-5-32-555': 'BUILTIN\\Remote Desktop Users',
+    'S-1-5-32-557': 'BUILTIN\\Incoming Forest Trust Builders',
     'S-1-5-32-556': 'BUILTIN\\Network Configuration Operators',
-    'S-1-5-32-558': 'BUILTIN\Performance Monitor Users',
-    'S-1-5-32-559': 'BUILTIN\Performance Log Users',
-    'S-1-5-32-560': 'BUILTIN\Windows Authorization Access Group',
-    'S-1-5-32-561': 'BUILTIN\Terminal Server License Servers',
-    'S-1-5-32-562': 'BUILTIN\Distributed COM Users',
-    'S-1-5-32-569': 'BUILTIN\Cryptographic Operators',
-    'S-1-5-32-573': 'BUILTIN\Event Log Readers',
-    'S-1-5-32-574': 'BUILTIN\Certificate Service DCOM Access',
-    'S-1-5-32-575': 'BUILTIN\RDS Remote Access Servers',
-    'S-1-5-32-576': 'BUILTIN\RDS Endpoint Servers',
-    'S-1-5-32-577': 'BUILTIN\RDS Management Servers',
-    'S-1-5-32-578': 'BUILTIN\Hyper-V Administrators',
-    'S-1-5-32-579': 'BUILTIN\Access Control Assistance Operators',
-    'S-1-5-32-580': 'BUILTIN\Remote Management Users',
+    'S-1-5-32-558': 'BUILTIN\\Performance Monitor Users',
+    'S-1-5-32-559': 'BUILTIN\\Performance Log Users',
+    'S-1-5-32-560': 'BUILTIN\\Windows Authorization Access Group',
+    'S-1-5-32-561': 'BUILTIN\\Terminal Server License Servers',
+    'S-1-5-32-562': 'BUILTIN\\Distributed COM Users',
+    'S-1-5-32-569': 'BUILTIN\\Cryptographic Operators',
+    'S-1-5-32-573': 'BUILTIN\\Event Log Readers',
+    'S-1-5-32-574': 'BUILTIN\\Certificate Service DCOM Access',
+    'S-1-5-32-575': 'BUILTIN\\RDS Remote Access Servers',
+    'S-1-5-32-576': 'BUILTIN\\RDS Endpoint Servers',
+    'S-1-5-32-577': 'BUILTIN\\RDS Management Servers',
+    'S-1-5-32-578': 'BUILTIN\\Hyper-V Administrators',
+    'S-1-5-32-579': 'BUILTIN\\Access Control Assistance Operators',
+    'S-1-5-32-580': 'BUILTIN\\Remote Management Users',
 }
 
 
@@ -222,10 +220,10 @@ class ALLOWED_OBJECT_ACE_MASK_FLAGS(Enum):
 class DACLedit(object):
     """docstring for setrbcd"""
 
-    def __init__(self, ldap_server, ldap_session, args):
+    def __init__(self, ldap_session, base_dn, args):
         super(DACLedit, self).__init__()
-        self.ldap_server = ldap_server
         self.ldap_session = ldap_session
+        self.base_dn = base_dn
 
         self.target_sAMAccountName = args.target_sAMAccountName
         self.target_SID = args.target_SID
@@ -243,16 +241,28 @@ class DACLedit(object):
         if self.inheritance:
             logging.info("NB: objects with adminCount=1 will no inherit ACEs from their parent container/OU")
 
-        logging.debug('Initializing domainDumper()')
-        cnf = ldapdomaindump.domainDumpConfig()
-        cnf.basepath = None
-        self.domain_dumper = ldapdomaindump.domainDumper(self.ldap_server, self.ldap_session, cnf)
+        self.dacl_controls = [ldapasn1.SDFlagsControl(flags=0x04)]
+
+        if args.mask is not None:
+            if args.mask.startswith("0x"):
+                self.force_mask = int(args.mask, 16)
+            elif args.mask == "readwrite":
+                self.force_mask = ldaptypes.ACCESS_ALLOWED_OBJECT_ACE.ADS_RIGHT_DS_READ_PROP + \
+                                ldaptypes.ACCESS_ALLOWED_OBJECT_ACE.ADS_RIGHT_DS_WRITE_PROP
+            elif args.mask == "write":
+                self.force_mask = ldaptypes.ACCESS_ALLOWED_OBJECT_ACE.ADS_RIGHT_DS_WRITE_PROP
+            elif args.mask == "self":
+                self.force_mask = ldaptypes.ACCESS_ALLOWED_OBJECT_ACE.ADS_RIGHT_DS_SELF
+            elif args.mask == "allext":
+                self.force_mask = ldaptypes.ACCESS_ALLOWED_OBJECT_ACE.ADS_RIGHT_DS_CONTROL_ACCESS
+        else:
+            self.force_mask = None
 
         if self.target_sAMAccountName or self.target_SID or self.target_DN:
             # Searching for target account with its security descriptor
             self.search_target_principal_security_descriptor()
             # Extract security descriptor data
-            self.principal_raw_security_descriptor = self.target_principal['nTSecurityDescriptor'].raw_values[0]
+            self.principal_raw_security_descriptor = ldap_value_to_bytes(get_entry_value(self.target_principal, 'nTSecurityDescriptor'))
             self.principal_security_descriptor = ldaptypes.SR_SECURITY_DESCRIPTOR(data=self.principal_raw_security_descriptor)
 
         # Searching for the principal SID if any principal argument was given and principal_SID wasn't
@@ -260,12 +270,12 @@ class DACLedit(object):
             _lookedup_principal = ""
             if self.principal_sAMAccountName is not None:
                 _lookedup_principal = self.principal_sAMAccountName
-                self.ldap_session.search(self.domain_dumper.root, '(sAMAccountName=%s)' % escape_filter_chars(_lookedup_principal), attributes=['objectSid'])
+                entries = search_entries(self.ldap_session, '(sAMAccountName=%s)' % escape_filter_chars(_lookedup_principal), self.base_dn, attributes=['objectSid'])
             elif self.principal_DN is not None:
                 _lookedup_principal = self.principal_DN
-                self.ldap_session.search(self.domain_dumper.root, '(distinguishedName=%s)' % _lookedup_principal, attributes=['objectSid'])
+                entries = search_entries(self.ldap_session, '(distinguishedName=%s)' % escape_filter_chars(_lookedup_principal), self.base_dn, attributes=['objectSid'])
             try:
-                self.principal_SID = format_sid(self.ldap_session.entries[0]['objectSid'].raw_values[0])
+                self.principal_SID = as_sid_string(get_entry_value(entries[0], 'objectSid'))
                 logging.debug("Found principal SID: %s" % self.principal_SID)
             except IndexError:
                 logging.error('Principal SID not found in LDAP (%s)' % _lookedup_principal)
@@ -286,16 +296,19 @@ class DACLedit(object):
         # Creates ACEs with the specified GUIDs and the SID, or FullControl if no GUID is specified
         # Append the ACEs in the DACL locally
         if self.rights == "FullControl" and self.rights_guid is None:
-            logging.debug("Appending ACE (%s --(FullControl)--> %s)" % (self.principal_SID, format_sid(self.target_SID)))
+            logging.debug("Appending ACE (%s --(FullControl)--> %s)" % (self.principal_SID, self.target_SID or self.target_sAMAccountName or self.target_DN))
             self.principal_security_descriptor['Dacl'].aces.append(self.create_ace(SIMPLE_PERMISSIONS.FullControl.value, self.principal_SID, self.ace_type))
+        elif self.rights == "Custom" and self.force_mask is not None:
+            logging.debug("Appending ACE (%s --(Custom)--> %s)" % (self.principal_SID, self.target_SID or self.target_sAMAccountName or self.target_DN))
+            self.principal_security_descriptor['Dacl'].aces.append(self.create_ace(self.force_mask, self.principal_SID, self.ace_type))
         else:
             for rights_guid in self.build_guids_for_rights():
-                logging.debug("Appending ACE (%s --(%s)--> %s)" % (self.principal_SID, rights_guid, format_sid(self.target_SID)))
-                self.principal_security_descriptor['Dacl'].aces.append(self.create_object_ace(rights_guid, self.principal_SID, self.ace_type))
+                logging.debug("Appending ACE (%s --(%s)--> %s)" % (self.principal_SID, rights_guid, self.target_SID or self.target_sAMAccountName or self.target_DN))
+                self.principal_security_descriptor['Dacl'].aces.append(self.create_object_ace(rights_guid, self.principal_SID, self.ace_type, force_mask=self.force_mask))
         # Backups current DACL before add the new one
         self.backup()
         # Effectively push the DACL with the new ACE
-        self.modify_secDesc_for_dn(self.target_principal.entry_dn, self.principal_security_descriptor)
+        self.modify_secDesc_for_dn(get_entry_dn(self.target_principal), self.principal_security_descriptor)
         return
 
 
@@ -307,9 +320,11 @@ class DACLedit(object):
         # These ACEs will be used as comparison templates
         if self.rights == "FullControl" and self.rights_guid is None:
             compare_aces.append(self.create_ace(SIMPLE_PERMISSIONS.FullControl.value, self.principal_SID, self.ace_type))
+        elif self.rights == "Custom" and self.force_mask is not None:
+            compare_aces.append(self.create_ace(self.force_mask, self.principal_SID, self.ace_type))
         else:
             for rights_guid in self.build_guids_for_rights():
-                compare_aces.append(self.create_object_ace(rights_guid, self.principal_SID, self.ace_type))
+                compare_aces.append(self.create_object_ace(rights_guid, self.principal_SID, self.ace_type, force_mask=self.force_mask))
         new_dacl = []
         i = 0
         dacl_must_be_replaced = False
@@ -350,7 +365,7 @@ class DACLedit(object):
         if dacl_must_be_replaced:
             self.principal_security_descriptor['Dacl'].aces = new_dacl
             self.backup()
-            self.modify_secDesc_for_dn(self.target_principal.entry_dn, self.principal_security_descriptor)
+            self.modify_secDesc_for_dn(get_entry_dn(self.target_principal), self.principal_security_descriptor)
         else:
             logging.info("Nothing to remove...")
 
@@ -360,7 +375,7 @@ class DACLedit(object):
     def backup(self):
         backup = {}
         backup["sd"] = binascii.hexlify(self.principal_raw_security_descriptor).decode('utf-8')
-        backup["dn"] = self.target_principal.entry_dn
+        backup["dn"] = get_entry_dn(self.target_principal)
         if not self.filename:
             self.filename = 'dacledit-%s.bak' % datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
         else:
@@ -387,7 +402,7 @@ class DACLedit(object):
         # Searching for target account with its security descriptor
         self.search_target_principal_security_descriptor()
         # Extract security descriptor data
-        self.principal_raw_security_descriptor = self.target_principal['nTSecurityDescriptor'].raw_values[0]
+        self.principal_raw_security_descriptor = ldap_value_to_bytes(get_entry_value(self.target_principal, 'nTSecurityDescriptor'))
         self.principal_security_descriptor = ldaptypes.SR_SECURITY_DESCRIPTOR(data=self.principal_raw_security_descriptor)
 
         # Do a backup of the actual DACL and push the restoration
@@ -398,19 +413,17 @@ class DACLedit(object):
     # Attempts to retrieve the DACL in the Security Descriptor of the specified target
     def search_target_principal_security_descriptor(self):
         _lookedup_principal = ""
-        # Set SD flags to only query for DACL
-        controls = security_descriptor_control(sdflags=0x04)
         if self.target_sAMAccountName is not None:
             _lookedup_principal = self.target_sAMAccountName
-            self.ldap_session.search(self.domain_dumper.root, '(sAMAccountName=%s)' % escape_filter_chars(_lookedup_principal), attributes=['nTSecurityDescriptor'], controls=controls)
+            entries = search_entries(self.ldap_session, '(sAMAccountName=%s)' % escape_filter_chars(_lookedup_principal), self.base_dn, attributes=['nTSecurityDescriptor'], search_controls=self.dacl_controls)
         elif self.target_SID is not None:
             _lookedup_principal = self.target_SID
-            self.ldap_session.search(self.domain_dumper.root, '(objectSid=%s)' % _lookedup_principal, attributes=['nTSecurityDescriptor'], controls=controls)
+            entries = search_entries(self.ldap_session, '(objectSid=%s)' % _lookedup_principal, self.base_dn, attributes=['nTSecurityDescriptor'], search_controls=self.dacl_controls)
         elif self.target_DN is not None:
             _lookedup_principal = self.target_DN
-            self.ldap_session.search(self.domain_dumper.root, '(distinguishedName=%s)' % _lookedup_principal, attributes=['nTSecurityDescriptor'], controls=controls)
+            entries = search_entries(self.ldap_session, '(distinguishedName=%s)' % escape_filter_chars(_lookedup_principal), self.base_dn, attributes=['nTSecurityDescriptor'], search_controls=self.dacl_controls)
         try:
-            self.target_principal = self.ldap_session.entries[0]
+            self.target_principal = entries[0]
             logging.debug('Target principal found in LDAP (%s)' % _lookedup_principal)
         except IndexError:
             logging.error('Target principal not found in LDAP (%s)' % _lookedup_principal)
@@ -421,12 +434,12 @@ class DACLedit(object):
     # Not used for the moment
     #   - samname : a sAMAccountName
     def get_user_info(self, samname):
-        self.ldap_session.search(self.domain_dumper.root, '(sAMAccountName=%s)' % escape_filter_chars(samname), attributes=['objectSid'])
+        entries = search_entries(self.ldap_session, '(sAMAccountName=%s)' % escape_filter_chars(samname), self.base_dn, attributes=['objectSid'])
         try:
-            dn = self.ldap_session.entries[0].entry_dn
-            sid = format_sid(self.ldap_session.entries[0]['objectSid'].raw_values[0])
+            dn = get_entry_dn(entries[0])
+            sid = as_sid_string(get_entry_value(entries[0], 'objectSid'))
             return dn, sid
-        except IndexError:
+        except (IndexError, TypeError):
             logging.error('User not found in LDAP: %s' % samname)
             return False
 
@@ -439,10 +452,9 @@ class DACLedit(object):
             return WELL_KNOWN_SIDS[sid]
         # Tries to resolve the SID from the LDAP domain dump
         else:
-            self.ldap_session.search(self.domain_dumper.root, '(objectSid=%s)' % sid, attributes=['samaccountname'])
+            entries = search_entries(self.ldap_session, '(objectSid=%s)' % sid, self.base_dn, attributes=['samaccountname'])
             try:
-                dn = self.ldap_session.entries[0].entry_dn
-                samname = self.ldap_session.entries[0]['samaccountname']
+                samname = as_string(get_entry_value(entries[0], 'samaccountname'))
                 return samname
             except IndexError:
                 logging.debug('SID not found in LDAP: %s' % sid)
@@ -470,7 +482,7 @@ class DACLedit(object):
         for PERM in SIMPLE_PERMISSIONS:
             if (fsr & PERM.value) == PERM.value:
                 _perms.append(PERM.name)
-                fsr = fsr & (not PERM.value)
+                fsr = fsr & (~ PERM.value)
         for PERM in ACCESS_MASK:
             if fsr & PERM.value:
                 _perms.append(PERM.name)
@@ -504,7 +516,7 @@ class DACLedit(object):
                 for FLAG in ALLOWED_OBJECT_ACE_MASK_FLAGS:
                     if ace['Ace']['Mask'].hasPriv(FLAG.value):
                         _access_mask_flags.append(FLAG.name)
-                parsed_ace['Access mask'] = ", ".join(_access_mask_flags)
+                parsed_ace['Access mask'] = "%s (0x%x)" % (", ".join(_access_mask_flags), ace['Ace']['Mask']['Mask'])
                 # Extracts the ACE flag values and the trusted SID
                 _object_flags = []
                 for FLAG in OBJECT_ACE_FLAGS:
@@ -549,12 +561,12 @@ class DACLedit(object):
         if self.principal_SID is None and self.principal_sAMAccountName or self.principal_DN:
             if self.principal_sAMAccountName is not None:
                 _lookedup_principal = self.principal_sAMAccountName
-                self.ldap_session.search(self.domain_dumper.root, '(sAMAccountName=%s)' % escape_filter_chars(_lookedup_principal), attributes=['objectSid'])
+                entries = search_entries(self.ldap_session, '(sAMAccountName=%s)' % escape_filter_chars(_lookedup_principal), self.base_dn, attributes=['objectSid'])
             elif self.principal_DN is not None:
                 _lookedup_principal = self.principal_DN
-                self.ldap_session.search(self.domain_dumper.root, '(distinguishedName=%s)' % _lookedup_principal, attributes=['objectSid'])
+                entries = search_entries(self.ldap_session, '(distinguishedName=%s)' % escape_filter_chars(_lookedup_principal), self.base_dn, attributes=['objectSid'])
             try:
-                self.principal_SID = format_sid(self.ldap_session.entries[0]['objectSid'].raw_values[0])
+                self.principal_SID = as_sid_string(get_entry_value(entries[0], 'objectSid'))
             except IndexError:
                 logging.error('Principal not found in LDAP (%s)' % _lookedup_principal)
                 return False
@@ -608,20 +620,12 @@ class DACLedit(object):
     #   - secDesc : the Security Descriptor with the new DACL to push
     def modify_secDesc_for_dn(self, dn, secDesc):
         data = secDesc.getData()
-        controls = security_descriptor_control(sdflags=0x04)
         logging.debug('Attempts to modify the Security Descriptor.')
-        self.ldap_session.modify(dn, {'nTSecurityDescriptor': (ldap3.MODIFY_REPLACE, [data])}, controls=controls)
-        if self.ldap_session.result['result'] == 0:
+        try:
+            self.ldap_session.modify(dn, {'nTSecurityDescriptor': [(ldap.MODIFY_REPLACE, [data])]}, controls=self.dacl_controls)
             logging.info('DACL modified successfully!')
-        else:
-            if self.ldap_session.result['result'] == 50:
-                logging.error('Could not modify object, the server reports insufficient rights: %s',
-                              self.ldap_session.result['message'])
-            elif self.ldap_session.result['result'] == 19:
-                logging.error('Could not modify object, the server reports a constrained violation: %s',
-                              self.ldap_session.result['message'])
-            else:
-                logging.error('The server returned an error: %s', self.ldap_session.result['message'])
+        except ldap.LDAPSessionError as error:
+            log_ldap_error('Could not modify object', error)
 
 
     # Builds a standard ACE for a specified access mask (rights) and a specified SID (the principal who obtains the right)
@@ -656,7 +660,7 @@ class DACLedit(object):
     #   - privguid : the ObjectType (an Extended Right here)
     #   - sid : the principal's SID
     #   - ace_type : the ACE type (allowed or denied)
-    def create_object_ace(self, privguid, sid, ace_type):
+    def create_object_ace(self, privguid, sid, ace_type, force_mask=None):
         nace = ldaptypes.ACE()
         if ace_type == "allowed":
             nace['AceType'] = ldaptypes.ACCESS_ALLOWED_OBJECT_ACE.ACE_TYPE
@@ -670,9 +674,11 @@ class DACLedit(object):
             nace['AceFlags'] = 0x00
         acedata['Mask'] = ldaptypes.ACCESS_MASK()
         # WriteMembers not an extended right, we need read and write mask on the attribute (https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-dtyp/c79a383c-2b3f-4655-abe7-dcbb7ce0cfbe)
-        if privguid == RIGHTS_GUID.WriteMembers.value:
-            acedata['Mask'][
-                'Mask'] = ldaptypes.ACCESS_ALLOWED_OBJECT_ACE.ADS_RIGHT_DS_READ_PROP + ldaptypes.ACCESS_ALLOWED_OBJECT_ACE.ADS_RIGHT_DS_WRITE_PROP
+        # force_mask in the case we give the -rights-guid option
+        if force_mask is not None:
+            acedata['Mask']['Mask'] = force_mask
+        elif privguid == RIGHTS_GUID.WriteMembers.value:
+            acedata['Mask']['Mask'] = ldaptypes.ACCESS_ALLOWED_OBJECT_ACE.ADS_RIGHT_DS_READ_PROP + ldaptypes.ACCESS_ALLOWED_OBJECT_ACE.ADS_RIGHT_DS_WRITE_PROP
         # Other rights in this script are extended rights and need the DS_CONTROL_ACCESS mask
         else:
             acedata['Mask']['Mask'] = ldaptypes.ACCESS_ALLOWED_OBJECT_ACE.ADS_RIGHT_DS_CONTROL_ACCESS
@@ -693,7 +699,7 @@ class DACLedit(object):
 def parse_args():
     parser = argparse.ArgumentParser(add_help=True, description='Python editor for a principal\'s DACL.')
     parser.add_argument('identity', action='store', help='domain.local/username[:password]')
-    parser.add_argument('-use-ldaps', action='store_true', help='Use LDAPS instead of LDAP')
+    parser.add_argument('-ldaps', '-use-ldaps', dest='ldaps', action='store_true', help='Use LDAPS instead of LDAP')
     parser.add_argument('-ts', action='store_true', help='Adds timestamp to every logging output')
     parser.add_argument('-debug', action='store_true', help='Turn DEBUG output ON')
 
@@ -703,6 +709,7 @@ def parse_args():
     auth_con.add_argument('-k', action="store_true", help='Use Kerberos authentication. Grabs credentials from ccache file (KRB5CCNAME) based on target parameters. If valid credentials cannot be found, it will use the ones specified in the command line')
     auth_con.add_argument('-aesKey', action="store", metavar="hex key", help='AES key to use for Kerberos Authentication (128 or 256 bits)')
     auth_con.add_argument('-dc-ip', action='store', metavar="ip address", help='IP Address of the domain controller or KDC (Key Distribution Center) for Kerberos. If omitted it will use the domain part (FQDN) specified in the identity parameter')
+    auth_con.add_argument('-dc-host', action='store', metavar="hostname", help='Hostname of the domain controller or KDC (Key Distribution Center) for Kerberos. If omitted, -dc-ip will be used')
 
     principal_parser = parser.add_argument_group("principal", description="Object, controlled by the attacker, to reference in the ACE to create or to filter when printing a DACL")
     principal_parser.add_argument("-principal", dest="principal_sAMAccountName", metavar="NAME", type=str, required=False, help="sAMAccountName")
@@ -718,8 +725,9 @@ def parse_args():
     dacl_parser.add_argument('-action', choices=['read', 'write', 'remove', 'backup', 'restore'], nargs='?', default='read', help='Action to operate on the DACL')
     dacl_parser.add_argument('-file', dest="filename", type=str, help='Filename/path (optional for -action backup, required for -restore))')
     dacl_parser.add_argument('-ace-type', choices=['allowed', 'denied'], nargs='?', default='allowed', help='The ACE Type (access allowed or denied) that must be added or removed (default: allowed)')
-    dacl_parser.add_argument('-rights', choices=['FullControl', 'ResetPassword', 'WriteMembers', 'DCSync'], nargs='?', default='FullControl', help='Rights to write/remove in the target DACL (default: FullControl)')
+    dacl_parser.add_argument('-rights', choices=['FullControl', 'ResetPassword', 'WriteMembers', 'DCSync', 'Custom'], nargs='?', default='FullControl', help='Rights to write/remove in the target DACL (default: FullControl)')
     dacl_parser.add_argument('-rights-guid', type=str, help='Manual GUID representing the right to write/remove')
+    dacl_parser.add_argument('-mask', nargs='?', default=None, help='Force access mask, possible values: readwrite, write, self, allext, 0xXXXXX. Useful with -rights Custom or --rights-guid where the mask is different of read+write.')
     dacl_parser.add_argument('-inheritance', action="store_true", help='Enable the inheritance in the ACE flag with CONTAINER_INHERIT_ACE and OBJECT_INHERIT_ACE. Useful when target is a Container or an OU, '
                                                                        'ACE will be inherited by objects within the container/OU (except objects with adminCount=1)')
 
@@ -730,232 +738,10 @@ def parse_args():
     return parser.parse_args()
 
 
-def parse_identity(args):
-    domain, username, password = utils.parse_credentials(args.identity)
-
-    if domain == '':
-        logging.critical('Domain should be specified!')
-        sys.exit(1)
-
-    if password == '' and username != '' and args.hashes is None and args.no_pass is False and args.aesKey is None:
-        from getpass import getpass
-        logging.info("No credentials supplied, supply password")
-        password = getpass("Password:")
-
-    if args.aesKey is not None:
-        args.k = True
-
-    if args.hashes is not None:
-        lmhash, nthash = args.hashes.split(':')
-    else:
-        lmhash = ''
-        nthash = ''
-
-    return domain, username, password, lmhash, nthash
-
-
-def init_logger(args):
-    # Init the example's logger theme and debug level
-    logger.init(args.ts)
-    if args.debug is True:
-        logging.getLogger().setLevel(logging.DEBUG)
-        # Print the Library's installation path
-        logging.debug(version.getInstallationPath())
-    else:
-        logging.getLogger().setLevel(logging.INFO)
-        logging.getLogger('impacket.smbserver').setLevel(logging.ERROR)
-
-
-def get_machine_name(args, domain):
-    if args.dc_ip is not None:
-        s = SMBConnection(args.dc_ip, args.dc_ip)
-    else:
-        s = SMBConnection(domain, domain)
-    try:
-        s.login('', '')
-    except Exception:
-        if s.getServerName() == '':
-            raise Exception('Error while anonymous logging into %s' % domain)
-    else:
-        s.logoff()
-    return s.getServerName()
-
-
-def ldap3_kerberos_login(connection, target, user, password, domain='', lmhash='', nthash='', aesKey='', kdcHost=None,
-                         TGT=None, TGS=None, useCache=True):
-    from pyasn1.codec.ber import encoder, decoder
-    from pyasn1.type.univ import noValue
-    """
-    logins into the target system explicitly using Kerberos. Hashes are used if RC4_HMAC is supported.
-    :param string user: username
-    :param string password: password for the user
-    :param string domain: domain where the account is valid for (required)
-    :param string lmhash: LMHASH used to authenticate using hashes (password is not used)
-    :param string nthash: NTHASH used to authenticate using hashes (password is not used)
-    :param string aesKey: aes256-cts-hmac-sha1-96 or aes128-cts-hmac-sha1-96 used for Kerberos authentication
-    :param string kdcHost: hostname or IP Address for the KDC. If None, the domain will be used (it needs to resolve tho)
-    :param struct TGT: If there's a TGT available, send the structure here and it will be used
-    :param struct TGS: same for TGS. See smb3.py for the format
-    :param bool useCache: whether or not we should use the ccache for credentials lookup. If TGT or TGS are specified this is False
-    :return: True, raises an Exception if error.
-    """
-
-    if lmhash != '' or nthash != '':
-        if len(lmhash) % 2:
-            lmhash = '0' + lmhash
-        if len(nthash) % 2:
-            nthash = '0' + nthash
-        try:  # just in case they were converted already
-            lmhash = unhexlify(lmhash)
-            nthash = unhexlify(nthash)
-        except TypeError:
-            pass
-
-    # Importing down here so pyasn1 is not required if kerberos is not used.
-    from impacket.krb5.ccache import CCache
-    from impacket.krb5.asn1 import AP_REQ, Authenticator, TGS_REP, seq_set
-    from impacket.krb5.kerberosv5 import getKerberosTGT, getKerberosTGS
-    from impacket.krb5 import constants
-    from impacket.krb5.types import Principal, KerberosTime, Ticket
-    import datetime
-
-    if TGT is not None or TGS is not None:
-        useCache = False
-
-    target = 'ldap/%s' % target
-    if useCache:
-        domain, user, TGT, TGS = CCache.parseFile(domain, user, target)
-
-    # First of all, we need to get a TGT for the user
-    userName = Principal(user, type=constants.PrincipalNameType.NT_PRINCIPAL.value)
-    if TGT is None:
-        if TGS is None:
-            tgt, cipher, oldSessionKey, sessionKey = getKerberosTGT(userName, password, domain, lmhash, nthash,
-                                                                    aesKey, kdcHost)
-    else:
-        tgt = TGT['KDC_REP']
-        cipher = TGT['cipher']
-        sessionKey = TGT['sessionKey']
-
-    if TGS is None:
-        serverName = Principal(target, type=constants.PrincipalNameType.NT_SRV_INST.value)
-        tgs, cipher, oldSessionKey, sessionKey = getKerberosTGS(serverName, domain, kdcHost, tgt, cipher,
-                                                                sessionKey)
-    else:
-        tgs = TGS['KDC_REP']
-        cipher = TGS['cipher']
-        sessionKey = TGS['sessionKey']
-
-        # Let's build a NegTokenInit with a Kerberos REQ_AP
-
-    blob = SPNEGO_NegTokenInit()
-
-    # Kerberos
-    blob['MechTypes'] = [TypesMech['MS KRB5 - Microsoft Kerberos 5']]
-
-    # Let's extract the ticket from the TGS
-    tgs = decoder.decode(tgs, asn1Spec=TGS_REP())[0]
-    ticket = Ticket()
-    ticket.from_asn1(tgs['ticket'])
-
-    # Now let's build the AP_REQ
-    apReq = AP_REQ()
-    apReq['pvno'] = 5
-    apReq['msg-type'] = int(constants.ApplicationTagNumbers.AP_REQ.value)
-
-    opts = []
-    apReq['ap-options'] = constants.encodeFlags(opts)
-    seq_set(apReq, 'ticket', ticket.to_asn1)
-
-    authenticator = Authenticator()
-    authenticator['authenticator-vno'] = 5
-    authenticator['crealm'] = domain
-    seq_set(authenticator, 'cname', userName.components_to_asn1)
-    now = datetime.datetime.utcnow()
-
-    authenticator['cusec'] = now.microsecond
-    authenticator['ctime'] = KerberosTime.to_asn1(now)
-
-    encodedAuthenticator = encoder.encode(authenticator)
-
-    # Key Usage 11
-    # AP-REQ Authenticator (includes application authenticator
-    # subkey), encrypted with the application session key
-    # (Section 5.5.1)
-    encryptedEncodedAuthenticator = cipher.encrypt(sessionKey, 11, encodedAuthenticator, None)
-
-    apReq['authenticator'] = noValue
-    apReq['authenticator']['etype'] = cipher.enctype
-    apReq['authenticator']['cipher'] = encryptedEncodedAuthenticator
-
-    blob['MechToken'] = encoder.encode(apReq)
-
-    request = ldap3.operation.bind.bind_operation(connection.version, ldap3.SASL, user, None, 'GSS-SPNEGO',
-                                                  blob.getData())
-
-    # Done with the Kerberos saga, now let's get into LDAP
-    if connection.closed:  # try to open connection if closed
-        connection.open(read_server_info=False)
-
-    connection.sasl_in_progress = True
-    response = connection.post_send_single_response(connection.send('bindRequest', request, None))
-    connection.sasl_in_progress = False
-    if response[0]['result'] != 0:
-        raise Exception(response)
-
-    connection.bound = True
-
-    return True
-
-
-def init_ldap_connection(target, tls_version, args, domain, username, password, lmhash, nthash):
-    user = '%s\\%s' % (domain, username)
-    connect_to = target
-    if args.dc_ip is not None:
-        connect_to = args.dc_ip
-    if tls_version is not None:
-        use_ssl = True
-        port = 636
-        tls = ldap3.Tls(validate=ssl.CERT_NONE, version=tls_version)
-    else:
-        use_ssl = False
-        port = 389
-        tls = None
-    ldap_server = ldap3.Server(connect_to, get_info=ldap3.ALL, port=port, use_ssl=use_ssl, tls=tls)
-    if args.k:
-        ldap_session = ldap3.Connection(ldap_server)
-        ldap_session.bind()
-        ldap3_kerberos_login(ldap_session, target, username, password, domain, lmhash, nthash, args.aesKey, kdcHost=args.dc_ip)
-    elif args.hashes is not None:
-        ldap_session = ldap3.Connection(ldap_server, user=user, password=lmhash + ":" + nthash, authentication=ldap3.NTLM, auto_bind=True)
-    else:
-        ldap_session = ldap3.Connection(ldap_server, user=user, password=password, authentication=ldap3.NTLM, auto_bind=True)
-
-    return ldap_server, ldap_session
-
-
-def init_ldap_session(args, domain, username, password, lmhash, nthash):
-    if args.k:
-        target = get_machine_name(args, domain)
-    else:
-        if args.dc_ip is not None:
-            target = args.dc_ip
-        else:
-            target = domain
-
-    if args.use_ldaps is True:
-        try:
-            return init_ldap_connection(target, ssl.PROTOCOL_TLSv1_2, args, domain, username, password, lmhash, nthash)
-        except ldap3.core.exceptions.LDAPSocketOpenError:
-            return init_ldap_connection(target, ssl.PROTOCOL_TLSv1, args, domain, username, password, lmhash, nthash)
-    else:
-        return init_ldap_connection(target, None, args, domain, username, password, lmhash, nthash)
-
-
 def main():
     print(version.BANNER)
     args = parse_args()
-    init_logger(args)
+    logger.init(args.ts, args.debug)
 
     if args.action == 'write' and args.principal_sAMAccountName is None and args.principal_SID is None and args.principal_DN is None:
         logging.critical('-principal, -principal-sid, or -principal-dn should be specified when using -action write')
@@ -964,13 +750,13 @@ def main():
     if args.action == "restore" and not args.filename:
         logging.critical('-file is required when using -action restore')
 
-    domain, username, password, lmhash, nthash = parse_identity(args)
-    if len(nthash) > 0 and lmhash == "":
-        lmhash = "aad3b435b51404eeaad3b435b51404ee"
+    domain, username, password, lmhash, nthash, args.k = parse_identity(args.identity, args.hashes, args.no_pass, args.aesKey, args.k)
 
     try:
-        ldap_server, ldap_session = init_ldap_session(args, domain, username, password, lmhash, nthash)
-        dacledit = DACLedit(ldap_server, ldap_session, args)
+        base_dn = ','.join('dc=%s' % part for part in domain.split('.'))
+        target = args.dc_host if args.dc_host is not None else domain
+        ldap_session = ldap_login(target, base_dn, args.dc_ip, args.dc_host, args.k, username, password, domain, lmhash, nthash, args.aesKey, ldaps_flag=args.ldaps)
+        dacledit = DACLedit(ldap_session, base_dn, args)
         if args.action == 'read':
             dacledit.read()
         elif args.action == 'write':

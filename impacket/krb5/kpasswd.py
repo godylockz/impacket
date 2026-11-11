@@ -1,6 +1,8 @@
 # Impacket - Collection of Python classes for working with network protocols.
 #
-# Copyright (C) 2023 Fortra. All rights reserved.
+# Copyright Fortra, LLC and its affiliated companies 
+#
+# All rights reserved.
 #
 # This software is provided under a slightly modified version
 # of the Apache Software License. See the accompanying LICENSE file
@@ -127,7 +129,7 @@ def createKPasswdRequest(principal, domain, newPasswd, tgs, cipher, sessionKey, 
         sequenceNumber = int.from_bytes(get_random_bytes(4), "big")
 
     if now is None:
-        now = datetime.datetime.utcnow()
+        now = datetime.datetime.now(datetime.timezone.utc)
 
     if not isinstance(newPasswd, bytes):
         newPasswd = newPasswd.encode("utf-8")
@@ -281,7 +283,7 @@ def decodeKPasswdReply(encoded, cipher, subKey):
 
 def changePassword(clientName, domain, newPasswd,
                    oldPasswd="", oldLmhash="", oldNthash="", aesKey="", TGT=None,
-                   kdcHost=None, kpasswdHost=None, kpasswdPort=KRB5_KPASSWD_PORT, subKey=None):
+                   kdcHost=None, kpasswdHost=None, kpasswdPort=KRB5_KPASSWD_PORT, subKey=None, timeout=None):
     """
     Change the password of the requesting user with RFC 3244 Kerberos Change-Password protocol.
 
@@ -302,19 +304,21 @@ def changePassword(clientName, domain, newPasswd,
     :param int kpasswdPort:     TCP port where kpasswd is exposed (Default: 464)
     :param string subKey:       Subkey to use to encrypt the password change request
                                 (Default: generate a random one)
+    :param int timeout:         connection timeout in seconds, for both the TGT retrieval and the
+                                kpasswd exchange (Default: None, blocks indefinitely)
 
     :return void:               Raise an KPasswdError exception on error.
     """
     setPassword(
         clientName, domain, None, None, newPasswd,
         oldPasswd, oldLmhash, oldNthash, aesKey, TGT,
-        kdcHost, kpasswdHost, kpasswdPort, subKey
+        kdcHost, kpasswdHost, kpasswdPort, subKey, timeout
     )
 
 
 def setPassword(clientName, domain, targetName, targetDomain, newPasswd,
                 oldPasswd="", oldLmhash="", oldNthash="", aesKey="", TGT=None,
-                kdcHost=None, kpasswdHost=None, kpasswdPort=KRB5_KPASSWD_PORT, subKey=None):
+                kdcHost=None, kpasswdHost=None, kpasswdPort=KRB5_KPASSWD_PORT, subKey=None, timeout=None):
     """
     Set the password of a target account with RFC 3244 Kerberos Set-Password protocol.
     Requires "Reset password" permission on the target, for the user.
@@ -339,6 +343,8 @@ def setPassword(clientName, domain, targetName, targetDomain, newPasswd,
     :param int kpasswdPort:     TCP port where kpasswd is exposed (Default: 464)
     :param string subKey:       Subkey to use to encrypt the password change request
                                 (Default: generate a random one)
+    :param int timeout:         connection timeout in seconds, for both the TGT retrieval and the
+                                kpasswd exchange (Default: None, blocks indefinitely)
 
     :return bool:               True if successful, raise an KPasswdError exception on error.
     """
@@ -368,7 +374,8 @@ def setPassword(clientName, domain, targetName, targetDomain, newPasswd,
 
     if TGT is None:
         tgt, cipher, oldSessionKey, sessionKey = getKerberosTGT(
-            userName, oldPasswd, domain, oldLmhash, oldNthash, aesKey, kdcHost, serverName=KRB5_KPASSWD_TGT_SPN
+            userName, oldPasswd, domain, oldLmhash, oldNthash, aesKey, kdcHost, serverName=KRB5_KPASSWD_TGT_SPN,
+            timeout=timeout
         )
     else:
         tgt = TGT["KDC_REP"]
@@ -391,7 +398,8 @@ def setPassword(clientName, domain, targetName, targetDomain, newPasswd,
     )
 
     # Send the request to KPASSWD
-    kpasswordRep = sendReceive(kpasswordReq, domain, kpasswdHost, kpasswdPort)
+    LOG.info("Sending password change request to {}:{}".format(kpasswdHost or domain, kpasswdPort))
+    kpasswordRep = sendReceive(kpasswordReq, domain, kpasswdHost, kpasswdPort, timeout=timeout)
 
     # Decode the result
     success, resultCode, resultCodeMessage, message = decodeKPasswdReply(kpasswordRep, cipher, subKey)

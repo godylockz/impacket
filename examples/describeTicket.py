@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 # Impacket - Collection of Python classes for working with network protocols.
 #
-# SECUREAUTH LABS. Copyright (C) 2021 SecureAuth Corporation. All rights reserved.
+# Copyright Fortra, LLC and its affiliated companies 
+#
+# All rights reserved.
 #
 # This software is provided under a slightly modified version
 # of the Apache Software License. See the accompanying LICENSE file
@@ -36,7 +38,7 @@ from impacket.krb5 import constants, pac
 from impacket.krb5.asn1 import TGS_REP, EncTicketPart, AD_IF_RELEVANT
 from impacket.krb5.ccache import CCache
 from impacket.krb5.constants import ChecksumTypes
-from impacket.krb5.crypto import Key, _enctype_table, InvalidChecksum, string_to_key
+from impacket.krb5.crypto import Key, _enctype_table, InvalidChecksum, generate_kerberos_keys
 from impacket.ldap.ldaptypes import LDAP_SID
 
 PSID = PRPC_SID
@@ -218,10 +220,9 @@ MsBuiltInGroups = {
 def parse_ccache(args):
     ccache = CCache.loadFile(args.ticket)
 
-    cred_number = 0
     logging.info('Number of credentials in cache: %d' % len(ccache.credentials))
 
-    for creds in ccache.credentials:
+    for cred_number, creds in enumerate(ccache.credentials):
         logging.info('Parsing credential[%d]:' % cred_number)
 
         rawTicket = creds.toTGS()
@@ -252,6 +253,8 @@ def parse_ccache(args):
             if ((creds['tktflags'] >> (31 - k.value)) & 1) == 1:
                 flags.append(constants.TicketFlags(k.value).name)
         logging.info("%-30s: (0x%x) %s" % ("Flags", creds['tktflags'], ", ".join(flags)))
+        etype = decodedTicket['ticket']['enc-part']['etype']
+        etype_enc = constants.EncryptionTypes(etype).name
         keyType = constants.EncryptionTypes(creds["key"]["keytype"]).name
         logging.info("%-30s: %s" % ("KeyType", keyType))
         logging.info("%-30s: %s" % ("Base64(key)", base64.b64encode(creds["key"]["keyvalue"]).decode("utf-8")))
@@ -261,11 +264,11 @@ def parse_ccache(args):
             kerberoast_hash = None
             # code adapted from Rubeus's DisplayTicket() (https://github.com/GhostPack/Rubeus/blob/3620814cd2c5f05e87cddd50211197bd932fec51/Rubeus/lib/LSA.cs)
             # if this isn't a TGT, try to display a Kerberoastable hash
-            if keyType != "rc4_hmac"  and keyType != "aes256_cts_hmac_sha1_96":
+            if etype_enc != "rc4_hmac"  and etype_enc != "aes256_cts_hmac_sha1_96":
                 # can only display rc4_hmac ad it doesn't have a salt. DES/AES keys require the user/domain as a salt, and we don't have
                 # the user account name that backs the requested SPN for the ticket, no no dice :(
-                logging.debug("Service ticket uses encryption key type %s, unable to extract hash and salt" % keyType)
-            elif keyType == "rc4_hmac":
+                logging.debug("Service ticket uses encryption key type %s, unable to extract hash and salt" % etype_enc)
+            elif etype_enc == "rc4_hmac":
                 kerberoast_hash = kerberoast_from_ccache(decodedTGS = decodedTicket, spn = spn, username = args.user, domain = args.domain)
             elif args.user:
                 if args.user.endswith("$"):
@@ -280,7 +283,6 @@ def parse_ccache(args):
 
         logging.info("%-30s:" % "Decoding unencrypted data in credential[%d]['ticket']" % cred_number)
         spn = "/".join(list([str(sname_component) for sname_component in decodedTicket['ticket']['sname']['name-string']]))
-        etype = decodedTicket['ticket']['enc-part']['etype']
         logging.info("  %-28s: %s" % ("Service Name", spn))
         logging.info("  %-28s: %s" % ("Service Realm", decodedTicket['ticket']['realm']))
         logging.info("  %-28s: %s (etype %d)" % ("Encryption type", constants.EncryptionTypes(etype).name, etype))
@@ -288,12 +290,12 @@ def parse_ccache(args):
             logging.debug("No kvno in ticket, skipping")
             logging.info("  %-28s: %d" % ("Key version number (kvno)", decodedTicket['ticket']['enc-part']['kvno']))
         logging.debug("Handling Kerberos keys")
-        ekeys = generate_kerberos_keys(args)
+        ekeys = generate_kerberos_keys(args.rc4, args.aes, args.password, args.hex_pass, args.salt, args.user, args.domain)
 
         # copypasta from krbrelayx.py
         # Select the correct encryption key
         try:
-            logging.debug('Ticket is encrypted with %s (etype %d)' % (constants.EncryptionTypes(etype).name, etype))
+            logging.debug('Ticket is encrypted with %s (etype %d)' % (etype_enc, etype))
             key = ekeys[etype]
             logging.debug('Using corresponding key: %s' % hexlify(key.contents).decode('utf-8'))
         # This raises a KeyError (pun intended) if our key is not found
@@ -307,7 +309,7 @@ def parse_ccache(args):
                 logging.error('Could not find the correct encryption key! Ticket is encrypted with %s (etype %d), but no keys/creds were supplied',
                               constants.EncryptionTypes(etype).name,
                               etype)
-            return None
+            continue
 
         # todo : decodedTicket['ticket']['enc-part'] is handled. Handle decodedTicket['enc-part']?
         # Recover plaintext info from ticket
@@ -320,7 +322,7 @@ def parse_ccache(args):
             if args.salt:
                 logging.info('Make sure the salt/username/domain are set and with the proper values. In case of a computer account, append a "$" to the name.')
                 logging.debug('Remember: the encrypted-part of the ticket is secured with one of the target service\'s Kerberos keys. The target service is the one who owns the \'Service Name\' SPN printed above')
-            return
+            continue
 
         logging.debug('Ticket successfully decrypted')
         encTicketPart = decoder.decode(plainText, asn1Spec=EncTicketPart())[0]
@@ -348,8 +350,6 @@ def parse_ccache(args):
                         logging.info("    %-26s:" % attribute)
                 else:
                     logging.info("    %-26s: %s" % (attribute, value))
-
-        cred_number += 1
 
 
 def parse_pac(pacType, args):
@@ -486,6 +486,24 @@ def parse_pac(pacType, args):
             parsed_data['Reserved3'] = kerbdata['Reserved3']
             parsed_tuPAC.append({"LoginInfo": parsed_data})
 
+        elif infoBuffer['ulType'] in (pac.PAC_CLIENT_CLAIMS_INFO_TYPE, pac.PAC_DEVICE_CLAIMS_INFO_TYPE):
+            # Parsing [MS-ADTS] 2.2.18 CLAIMS_SET (client/device claims)
+            label = "Client Claims" if infoBuffer['ulType'] == pac.PAC_CLIENT_CLAIMS_INFO_TYPE else "Device Claims"
+            parsed_data = {}
+            if not data:
+                parsed_data['  (none)'] = ''
+            else:
+                try:
+                    claims = pac.parse_claims_set(data)
+                    if not claims:
+                        parsed_data['  (none)'] = ''
+                    for claim in claims:
+                        key = "  [%s] %s (%s)" % (claim['source'], claim['id'], claim['type'])
+                        parsed_data[key] = ', '.join(str(v) for v in claim['values'])
+                except NotImplementedError as e:
+                    parsed_data['  <not decoded>'] = str(e)
+            parsed_tuPAC.append({label: parsed_data})
+
         elif infoBuffer['ulType'] == pac.PAC_CLIENT_INFO_TYPE:
             clientInfo = pac.PAC_CLIENT_INFO()
             clientInfo.fromString(data)
@@ -540,6 +558,26 @@ def parse_pac(pacType, args):
                 parsed_data["SamAccountName"] = SamName
                 parsed_data["UserSid"] = Sid.formatCanonical()
             parsed_tuPAC.append({"UpnDns": parsed_data})
+
+        elif infoBuffer['ulType'] == pac.PAC_DEVICE_INFO_TYPE:
+            # [MS-PAC] 2.12 PAC_DEVICE_INFO (the armor device behind device claims)
+            parsed_data = {}
+            try:
+                type1 = TypeSerialization1(data)
+                newdata = data[len(type1) + 4:]
+                devinfo = pac.PAC_DEVICE_INFO()
+                devinfo.fromString(newdata)
+                devinfo.fromStringReferents(newdata[len(devinfo.getData()):])
+                parsed_data['Device RID']          = devinfo['UserId']
+                parsed_data['Primary Group Id']    = devinfo['PrimaryGroupId']
+                parsed_data['Account Domain SID']  = devinfo['AccountDomainId'].formatCanonical()
+                parsed_data['Account Group Count'] = devinfo['AccountGroupCount']
+                parsed_data['Account Group RIDs']  = [g['RelativeId'] for g in devinfo['AccountGroupIds']]
+                parsed_data['SID Count']           = devinfo['SidCount']
+                parsed_data['Extra SIDs']          = [s['Sid'].formatCanonical() for s in devinfo['ExtraSids']]
+            except Exception as e:
+                parsed_data['<present, not decoded>'] = "%d bytes (%s)" % (len(data), e)
+            parsed_tuPAC.append({"Device Info": parsed_data})
 
         elif infoBuffer['ulType'] == pac.PAC_SERVER_CHECKSUM:
             signatureData = pac.PAC_SIGNATURE_DATA(data)
@@ -627,56 +665,6 @@ def parse_pac(pacType, args):
         buff = buff[len(infoBuffer):]
     return parsed_tuPAC
 
-
-def generate_kerberos_keys(args):
-    # copypasta from krbrelayx.py
-    # Store Kerberos keys
-    keys = {}
-    if args.rc4:
-        keys[int(constants.EncryptionTypes.rc4_hmac.value)] = unhexlify(args.rc4)
-    if args.aes:
-        if len(args.aes) == 64:
-            keys[int(constants.EncryptionTypes.aes256_cts_hmac_sha1_96.value)] = unhexlify(args.aes)
-        else:
-            keys[int(constants.EncryptionTypes.aes128_cts_hmac_sha1_96.value)] = unhexlify(args.aes)
-    ekeys = {}
-    for kt, key in keys.items():
-        ekeys[kt] = Key(kt, key)
-
-    allciphers = [
-        int(constants.EncryptionTypes.rc4_hmac.value),
-        int(constants.EncryptionTypes.aes256_cts_hmac_sha1_96.value),
-        int(constants.EncryptionTypes.aes128_cts_hmac_sha1_96.value)
-    ]
-
-    # Calculate Kerberos keys from specified password/salt
-    if args.password or args.hex_pass:
-        if not args.salt and args.user and args.domain: # https://www.thehacker.recipes/ad/movement/kerberos
-            if args.user.endswith('$'):
-                args.salt = "%shost%s.%s" % (args.domain.upper(), args.user.rstrip('$').lower(), args.domain.lower())
-            else:
-                args.salt = "%s%s" % (args.domain.upper(), args.user)
-        for cipher in allciphers:
-            if cipher == 23 and args.hex_pass:
-                # RC4 calculation is done manually for raw passwords
-                md4 = MD4.new()
-                md4.update(unhexlify(args.hex_pass))
-                ekeys[cipher] = Key(cipher, md4.digest())
-                logging.debug('Calculated type %s (%d) Kerberos key: %s' % (constants.EncryptionTypes(cipher).name, cipher, hexlify(ekeys[cipher].contents).decode('utf-8')))
-            elif args.salt:
-                # Do conversion magic for raw passwords
-                if args.hex_pass:
-                    rawsecret = unhexlify(args.hex_pass).decode('utf-16-le', 'replace').encode('utf-8', 'replace')
-                else:
-                    # If not raw, it was specified from the command line, assume it's not UTF-16
-                    rawsecret = args.password
-                ekeys[cipher] = string_to_key(cipher, rawsecret, args.salt)
-                logging.debug('Calculated type %s (%d) Kerberos key: %s' % (constants.EncryptionTypes(cipher).name, cipher, hexlify(ekeys[cipher].contents).decode('utf-8')))
-            else:
-                logging.debug('Cannot calculate type %s (%d) Kerberos key: salt is None: Missing -s/--salt or (-u/--user and -d/--domain)' % (constants.EncryptionTypes(cipher).name, cipher))
-    else:
-        logging.debug('No password (-p/--password or -hp/--hex_pass supplied, skipping Kerberos keys calculation')
-    return ekeys
 
 
 def kerberoast_from_ccache(decodedTGS, spn, username, domain):
@@ -767,23 +755,10 @@ def parse_args():
 
     return args
 
-
-def init_logger(args):
-    # Init the example's logger theme and debug level
-    logger.init(args.ts)
-    if args.debug is True:
-        logging.getLogger().setLevel(logging.DEBUG)
-        # Print the Library's installation path
-        logging.debug(version.getInstallationPath())
-    else:
-        logging.getLogger().setLevel(logging.INFO)
-        logging.getLogger('impacket.smbserver').setLevel(logging.ERROR)
-
-
 def main():
     print(version.BANNER)
     args = parse_args()
-    init_logger(args)
+    logger.init(args.ts, args.debug)
 
     try:
         parse_ccache(args)

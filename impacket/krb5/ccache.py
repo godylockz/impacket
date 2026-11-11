@@ -1,6 +1,8 @@
 # Impacket - Collection of Python classes for working with network protocols.
 #
-# Copyright (C) 2023 Fortra. All rights reserved.
+# Copyright Fortra, LLC and its affiliated companies 
+#
+# All rights reserved.
 #
 # This software is provided under a slightly modified version
 # of the Apache Software License. See the accompanying LICENSE file
@@ -16,9 +18,7 @@
 # Author:
 #   Alberto Solino (@agsolino)
 #
-from __future__ import division
-from __future__ import print_function
-from datetime import datetime
+from datetime import datetime, timezone
 import os
 from struct import pack, unpack, calcsize
 from six import b, PY2
@@ -123,6 +123,7 @@ class Principal:
             ('name_type','!L=0'),
             ('num_components','!L=0'),
         )
+
     def __init__(self, data=None):
         self.components = []
         self.realm = None
@@ -212,8 +213,8 @@ class Credential:
         )
 
     def __init__(self, data=None, ccache_version=None):
-        self.addresses = ()
-        self.authData = ()
+        self.addresses = []
+        self.authData = []
         self.header = None
         self.ticket = None
         self.secondTicket = None
@@ -225,7 +226,6 @@ class Credential:
                 self.header = self.CredentialHeaderV4(data)
 
             data = data[len(self.header):]
-            self.addresses = []
             for address in range(self.header['num_address']):
                 ad = Address(data)
                 data = data[len(ad):]
@@ -318,6 +318,7 @@ class Credential:
         tgt['KDC_REP'] = encoder.encode(tgt_rep)
         tgt['cipher'] = cipher
         tgt['sessionKey'] = crypto.Key(cipher.enctype, self['key']['keyvalue'])
+        tgt['client'] = self['client']
         return tgt
 
     def toTGS(self, newSPN=None):
@@ -424,16 +425,70 @@ class CCache:
             for c in self.credentials:
                 # Let's search for any TGT/TGS that matches the server w/o the SPN's service type/port, returns
                 # the first one
-                if c['server'].prettyPrint().find(b'/') >=0:
-                    # Let's take the port out for comparison
-                    cachedSPN = (c['server'].prettyPrint().upper().split(b'/')[1].split(b'@')[0].split(b':')[0] + b'@' + c['server'].prettyPrint().upper().split(b'/')[1].split(b'@')[1])
-                    searchSPN = '%s@%s' % (server.upper().split('/')[1].split('@')[0].split(':')[0],
-                                               server.upper().split('/')[1].split('@')[1])
+                # If server has no '/' we assume it's a ST from S4U2Self without a service type
+                if c['server'].prettyPrint().find(b'/') >= 0:
+                    # Match both service/host@REALM and service/host/domain@REALM.
+                    # Seen when a service ticket is dumped from LSASS memory (e.g. via
+                    # Rubeus' `dump` command) rather than requested fresh - Windows caches
+                    # such tickets with the domain suffix appended as an extra SPN
+                    # component, e.g. LDAP/dc.domain.local/domain.local@REALM
+                    cachedParts = c['server'].prettyPrint().upper().split(b'/')
+                    cachedHost = cachedParts[1].split(b'@')[0].split(b':', 1)[0]
+                    cachedRealm = cachedParts[-1].split(b'@')[-1]
+
+                    serverParts = server.upper().split('/')
+                    searchHost = b(serverParts[1].split('@')[0].split(':', 1)[0])
+                    searchRealm = b(serverParts[-1].split('@')[-1])
+
+                    hostsMatch = cachedHost == searchHost
+
+                    # Allow short-name/FQDN matching only when at least one
+                    # side is actually an unqualified hostname.
+                    if not hostsMatch and (b'.' not in cachedHost or b'.' not in searchHost):
+                        hostsMatch = cachedHost.split(b'.', 1)[0] == searchHost.split(b'.', 1)[0]
+
+                    if hostsMatch and cachedRealm == searchRealm:
+                        LOG.debug('Returning cached credential for %s' % c['server'].prettyPrint().upper().decode('utf-8'))
+                        return c
+                else:
+                    # Should be of form 'hostname$@REALM'
+                    cachedSPN = (c['server'].prettyPrint().upper().split(b'@')[0].split(b':')[0] + b'@' + c['server'].prettyPrint().upper().split(b'@')[1])
+                    searchSPN = f"{server.upper().split('/')[1].split('@')[0].split(':')[0].split('.')[0]}$@{server.upper().split('/')[1].split('@')[1]}"
                     if cachedSPN == b(searchSPN):
                         LOG.debug('Returning cached credential for %s' % c['server'].prettyPrint().upper().decode('utf-8'))
                         return c
 
         return None
+
+    def getInterRealmTGT(self, domain, targetRealm=None):
+        """
+        Returns an inter-realm (referral) TGT issued by domain, that is a
+        krbtgt/<otherRealm>@<domain> credential. Such a TGT is only usable against
+        <otherRealm>'s KDC, which getKerberosTGS() takes care of.
+
+        :param domain: the realm that issued the referral TGT
+        :param targetRealm: preferred <otherRealm>, to choose when the cache holds several
+
+        :return: the matching Credential, or None
+        """
+        domain = domain.upper()
+        targetRealm = targetRealm.upper() if targetRealm else None
+
+        tgts = {}
+        for c in self.credentials:
+            server = c['server'].prettyPrint().decode('utf-8', 'replace').upper()
+            if server.count('/') != 1 or server.count('@') != 1 or not server.startswith('KRBTGT/'):
+                continue
+            serviceRealm, ticketRealm = server[len('KRBTGT/'):].split('@')
+            if ticketRealm == domain and serviceRealm != domain:
+                tgts.setdefault(serviceRealm, c)
+
+        if not tgts:
+            return None
+
+        serviceRealm = targetRealm if targetRealm in tgts else sorted(tgts)[0]
+        LOG.debug('Returning inter-realm TGT krbtgt/%s@%s' % (serviceRealm, domain))
+        return tgts[serviceRealm]
 
     def toTimeStamp(self, dt, epoch=datetime(1970,1,1)):
         td = dt - epoch
@@ -441,13 +496,18 @@ class CCache:
         return int((td.microseconds + (td.seconds + td.days * 24 * 3600) * 10**6) // 1e6)
 
     def reverseFlags(self, flags):
-        result = 0
+        # If passed as a string representation (e.g., "'010100...'B"), clean it up
         if isinstance(flags, str):
-            flags = flags[1:-2]
-        for i,j in enumerate(reversed(flags)):
-            if j != 0:
-                result += j << i
-        return result
+            bit_str = flags.replace("'", "").replace("B", "")
+        else:
+            # Standard pyasn1 BitString handling: join the bits into a string
+            bit_str = "".join(str(bit) for bit in flags)
+
+        # Ensure it's exactly 32 bits by padding with zeros on the right
+        bit_str = bit_str.ljust(32, '0')[:32]
+
+        # Convert the base-2 binary string back to an integer
+        return int(bit_str, 2)
 
     def fromTGT(self, tgt, oldSessionKey, sessionKey):
         self.headers = []
@@ -475,7 +535,9 @@ class CCache:
         # (Section 5.4.2)
         plainText = cipher.decrypt(oldSessionKey, 3, cipherText)
 
-        encASRepPart = decoder.decode(plainText, asn1Spec = EncASRepPart())[0]
+        # MIT krb5 also uses the EncTGSRepPart tag for AS-REP encrypted data.
+        encPartSpec = EncTGSRepPart() if plainText[:1] == b'\x7a' else EncASRepPart()
+        encASRepPart = decoder.decode(plainText, asn1Spec=encPartSpec)[0]
         credential = Credential()
         server = types.Principal()
         server.from_asn1(encASRepPart, 'srealm', 'sname')
@@ -493,7 +555,8 @@ class CCache:
 
         credential['time'] = Times()
         credential['time']['authtime'] = self.toTimeStamp(types.KerberosTime.from_asn1(encASRepPart['authtime']))
-        credential['time']['starttime'] = self.toTimeStamp(types.KerberosTime.from_asn1(encASRepPart['starttime']))
+        starttime = encASRepPart['starttime'] if encASRepPart['starttime'].hasValue() else encASRepPart['authtime']
+        credential['time']['starttime'] = self.toTimeStamp(types.KerberosTime.from_asn1(starttime))
         credential['time']['endtime'] = self.toTimeStamp(types.KerberosTime.from_asn1(encASRepPart['endtime']))
         # After KB4586793 for CVE-2020-17049 this timestamp may be omitted
         if encASRepPart['renew-till'].hasValue():
@@ -554,7 +617,8 @@ class CCache:
 
         credential['time'] = Times()
         credential['time']['authtime'] = self.toTimeStamp(types.KerberosTime.from_asn1(encTGSRepPart['authtime']))
-        credential['time']['starttime'] = self.toTimeStamp(types.KerberosTime.from_asn1(encTGSRepPart['starttime']))
+        starttime = encTGSRepPart['starttime'] if encTGSRepPart['starttime'].hasValue() else encTGSRepPart['authtime']
+        credential['time']['starttime'] = self.toTimeStamp(types.KerberosTime.from_asn1(starttime))
         credential['time']['endtime'] = self.toTimeStamp(types.KerberosTime.from_asn1(encTGSRepPart['endtime']))
         # After KB4586793 for CVE-2020-17049 this timestamp may be omitted
         if encTGSRepPart['renew-till'].hasValue():
@@ -588,19 +652,23 @@ class CCache:
         except FileNotFoundError as e:
             raise e
 
-    def saveFile(self, fileName):
+    def saveFile(self, fileName, chmod=None):
         f = open(fileName, 'wb+')
         f.write(self.getData())
         f.close()
+        if chmod is not None:
+            os.chmod(fileName, chmod)
 
     @classmethod
-    def parseFile(cls, domain='', username='', target=''):
+    def parseFile(cls, domain='', username='', target='', anySPN=True):
         """
         parses the CCache file specified in the KRB5CCNAME environment variable
 
         :param domain: an optional domain name of a user
         :param username: an optional username of a user
         :param target: an optional SPN of a target system
+        :param anySPN: whether a ticket for another service on the same host can
+                       satisfy the target lookup
 
         :return: domain, username, TGT, TGS
         """
@@ -618,13 +686,18 @@ class CCache:
         creds = None
         if target != '':
             principal = '%s@%s' % (target.upper(), domain.upper())
-            creds = ccache.getCredential(principal)
+            creds = ccache.getCredential(principal, anySPN=anySPN)
 
         TGT = None
         TGS = None
         if creds is None:
             principal = 'krbtgt/%s@%s' % (domain.upper(), domain.upper())
-            creds = ccache.getCredential(principal)
+            creds = ccache.getCredential(principal, anySPN=anySPN)
+            if creds is None:
+                targetHost = target.split('/')[-1].split('@')[0]
+                # the target's DNS suffix is only a hint, used to choose between several referral TGTs
+                targetRealm = targetHost.split('.', 1)[1] if '.' in targetHost else None
+                creds = ccache.getInterRealmTGT(domain, targetRealm)
             if creds is not None:
                 LOG.debug('Using TGT from cache')
                 TGT = creds.toTGT()
@@ -665,100 +738,136 @@ class CCache:
         f.close()
 
     def fromKRBCRED(self, encodedKrbCred):
-
         krbCred = decoder.decode(encodedKrbCred, asn1Spec=KRB_CRED())[0]
-        encKrbCredPart = decoder.decode(krbCred['enc-part']['cipher'], asn1Spec=EncKrbCredPart())[0]
-        krbCredInfo = encKrbCredPart['ticket-info'][0]
+        encKrbCredPart = decoder.decode(
+            krbCred["enc-part"]["cipher"], asn1Spec=EncKrbCredPart()
+        )[0]
 
         self.setDefaultHeader()
 
-        tmpPrincipal = types.Principal()
-        tmpPrincipal.from_asn1(krbCredInfo, 'prealm', 'pname')
-        self.principal = Principal()
-        self.principal.fromPrincipal(tmpPrincipal)
+        # Loop through all ticket-info entries
+        for i, krbCredInfo in enumerate(encKrbCredPart["ticket-info"]):
+            tmpPrincipal = types.Principal()
+            tmpPrincipal.from_asn1(krbCredInfo, "prealm", "pname")
+            principal = Principal()
+            principal.fromPrincipal(tmpPrincipal)
+            # Set the ccache principal from the first entry
+            if i == 0:
+                self.principal = principal
 
-        credential = Credential()
-        server = types.Principal()
-        server.from_asn1(krbCredInfo, 'srealm', 'sname')
-        tmpServer = Principal()
-        tmpServer.fromPrincipal(server)
+            credential = Credential()
+            server = types.Principal()
+            server.from_asn1(krbCredInfo, "srealm", "sname")
+            tmpServer = Principal()
+            tmpServer.fromPrincipal(server)
 
-        credential['client'] = self.principal
-        credential['server'] = tmpServer
-        credential['is_skey'] = 0
+            credential["client"] = principal
+            credential["server"] = tmpServer
+            credential["is_skey"] = 0
 
-        credential['key'] = KeyBlockV4()
-        credential['key']['keytype'] = int(krbCredInfo['key']['keytype'])
-        credential['key']['keyvalue'] = krbCredInfo['key']['keyvalue'].asOctets()
-        credential['key']['keylen'] = len(credential['key']['keyvalue'])
+            credential["key"] = KeyBlockV4()
+            credential["key"]["keytype"] = int(krbCredInfo["key"]["keytype"])
+            credential["key"]["keyvalue"] = krbCredInfo["key"]["keyvalue"].asOctets()
+            credential["key"]["keylen"] = len(credential["key"]["keyvalue"])
 
-        credential['time'] = Times()
+            credential["time"] = Times()
 
-        credential['time']['authtime'] = self.toTimeStamp(types.KerberosTime.from_asn1(krbCredInfo['starttime']))
-        credential['time']['starttime'] = self.toTimeStamp(types.KerberosTime.from_asn1(krbCredInfo['starttime']))
-        credential['time']['endtime'] = self.toTimeStamp(types.KerberosTime.from_asn1(krbCredInfo['endtime']))
-        # After KB4586793 for CVE-2020-17049 this timestamp may be omitted
-        if krbCredInfo['renew-till'].hasValue():
-            credential['time']['renew_till'] = self.toTimeStamp(types.KerberosTime.from_asn1(krbCredInfo['renew-till']))
+            credential["time"]["authtime"] = self.toTimeStamp(
+                types.KerberosTime.from_asn1(krbCredInfo["starttime"])
+            )
+            credential["time"]["starttime"] = self.toTimeStamp(
+                types.KerberosTime.from_asn1(krbCredInfo["starttime"])
+            )
+            credential["time"]["endtime"] = self.toTimeStamp(
+                types.KerberosTime.from_asn1(krbCredInfo["endtime"])
+            )
+            # After KB4586793 for CVE-2020-17049 this timestamp may be omitted
+            if krbCredInfo["renew-till"].hasValue():
+                credential["time"]["renew_till"] = self.toTimeStamp(
+                    types.KerberosTime.from_asn1(krbCredInfo["renew-till"])
+                )
 
-        flags = self.reverseFlags(krbCredInfo['flags'])
-        credential['tktflags'] = flags
+            flags = self.reverseFlags(krbCredInfo["flags"])
+            credential["tktflags"] = flags
 
-        credential['num_address'] = 0
-        credential.ticket = CountedOctetString()
-        credential.ticket['data'] = encoder.encode(
-            krbCred['tickets'][0].clone(tagSet=Ticket.tagSet, cloneValueFlag=True)
-        )
-        credential.ticket['length'] = len(credential.ticket['data'])
-        credential.secondTicket = CountedOctetString()
-        credential.secondTicket['data'] = b''
-        credential.secondTicket['length'] = 0
+            credential["num_address"] = 0
+            credential.ticket = CountedOctetString()
+            credential.ticket["data"] = encoder.encode(
+                krbCred["tickets"][i].clone(tagSet=Ticket.tagSet, cloneValueFlag=True)
+            )
+            credential.ticket["length"] = len(credential.ticket["data"])
+            credential.secondTicket = CountedOctetString()
+            credential.secondTicket["data"] = b""
+            credential.secondTicket["length"] = 0
 
-        self.credentials.append(credential)
+            self.credentials.append(credential)
 
     def toKRBCRED(self):
         principal = self.principal
-        credential = self.credentials[0]
 
-        krbCredInfo = KrbCredInfo()
+        krbCredInfos = []
+        tickets = []
 
-        krbCredInfo['key'] = noValue
-        krbCredInfo['key']['keytype'] = credential['key']['keytype']
-        krbCredInfo['key']['keyvalue'] = credential['key']['keyvalue']
+        for credential in self.credentials:
+            krbCredInfo = KrbCredInfo()
 
-        krbCredInfo['prealm'] = principal.realm.fields['data']
+            krbCredInfo["key"] = noValue
+            krbCredInfo["key"]["keytype"] = credential["key"]["keytype"]
+            krbCredInfo["key"]["keyvalue"] = credential["key"]["keyvalue"]
 
-        krbCredInfo['pname'] = noValue
-        krbCredInfo['pname']['name-type'] = principal.header['name_type']
-        seq_set_iter(krbCredInfo['pname'], 'name-string', (principal.components[0].fields['data'],))
+            krbCredInfo["prealm"] = credential['client'].realm.fields["data"]
 
-        krbCredInfo['flags'] = credential['tktflags']
+            krbCredInfo["pname"] = noValue
+            krbCredInfo["pname"]["name-type"] = credential['client'].header["name_type"]
+            seq_set_iter(
+                krbCredInfo["pname"],
+                "name-string",
+                tuple(c.fields["data"] for c in credential['client'].components),
+            )
 
-        krbCredInfo['starttime'] = KerberosTime.to_asn1(datetime.utcfromtimestamp(credential['time']['starttime']))
-        krbCredInfo['endtime'] = KerberosTime.to_asn1(datetime.utcfromtimestamp(credential['time']['endtime']))
-        krbCredInfo['renew-till'] = KerberosTime.to_asn1(datetime.utcfromtimestamp(credential['time']['renew_till']))
+            # Force the 32 bit representation to avoid any precision loss due to ASN1 conversion
+            krbCredInfo["flags"] = f"{int(credential['tktflags']):032b}"
 
-        krbCredInfo['srealm'] = credential['server'].realm.fields['data']
+            krbCredInfo["starttime"] = KerberosTime.to_asn1(
+                datetime.fromtimestamp(credential["time"]["starttime"], tz=timezone.utc)
+            )
+            krbCredInfo["endtime"] = KerberosTime.to_asn1(
+                datetime.fromtimestamp(credential["time"]["endtime"], tz=timezone.utc)
+            )
+            if credential["time"]["renew_till"] != 0:
+                krbCredInfo["renew-till"] = KerberosTime.to_asn1(
+                    datetime.fromtimestamp(
+                        credential["time"]["renew_till"], tz=timezone.utc
+                    )
+                )
 
-        krbCredInfo['sname'] = noValue
-        krbCredInfo['sname']['name-type'] = credential['server'].header['name_type']
-        tmp_service_class = credential['server'].components[0].fields['data']
-        tmp_service_hostname = credential['server'].components[1].fields['data']
-        seq_set_iter(krbCredInfo['sname'], 'name-string', (tmp_service_class, tmp_service_hostname))
+            krbCredInfo["srealm"] = credential["server"].realm.fields["data"]
+
+            krbCredInfo["sname"] = noValue
+            krbCredInfo["sname"]["name-type"] = credential["server"].header["name_type"]
+            seq_set_iter(
+                krbCredInfo["sname"],
+                "name-string",
+                tuple(c.fields["data"] for c in credential["server"].components),
+            )
+
+            krbCredInfos.append(krbCredInfo)
+
+            ticket = decoder.decode(credential.ticket["data"], asn1Spec=Ticket())[0]
+            tickets.append(ticket)
 
         encKrbCredPart = EncKrbCredPart()
-        seq_set_iter(encKrbCredPart, 'ticket-info', (krbCredInfo,))
+        seq_set_iter(encKrbCredPart, "ticket-info", krbCredInfos)
 
         krbCred = KRB_CRED()
-        krbCred['pvno'] = 5
-        krbCred['msg-type'] = 22
+        krbCred["pvno"] = 5
+        krbCred["msg-type"] = 22
 
-        krbCred['enc-part'] = noValue
-        krbCred['enc-part']['etype'] = 0
-        krbCred['enc-part']['cipher'] = encoder.encode(encKrbCredPart)
+        krbCred["enc-part"] = noValue
+        krbCred["enc-part"]["etype"] = 0
+        krbCred["enc-part"]["cipher"] = encoder.encode(encKrbCredPart)
 
-        ticket = decoder.decode(credential.ticket['data'], asn1Spec=Ticket())[0]
-        seq_set_iter(krbCred, 'tickets', (ticket,))
+        seq_set_iter(krbCred, "tickets", tickets)
 
         encodedKrbCred = encoder.encode(krbCred)
 
@@ -771,7 +880,6 @@ class CCache:
         header['taglen'] = 8
         header['tagdata'] = b'\xff\xff\xff\xff\x00\x00\x00\x00'
         self.headers.append(header)
-
 
 
 if __name__ == '__main__':

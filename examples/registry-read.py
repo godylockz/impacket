@@ -1,7 +1,9 @@
 #!/usr/bin/env python
 # Impacket - Collection of Python classes for working with network protocols.
 #
-# Copyright (C) 2023 Fortra. All rights reserved.
+# Copyright Fortra, LLC and its affiliated companies 
+#
+# All rights reserved.
 #
 # This software is provided under a slightly modified version
 # of the Apache Software License. See the accompanying LICENSE file
@@ -17,8 +19,6 @@
 #   winregistry.py
 #
 
-from __future__ import division
-from __future__ import print_function
 import sys
 import argparse
 import ntpath
@@ -72,7 +72,7 @@ def getValue(reg, keyValue):
         return
 
     print("Value for %s:\n    " % regValue, end=' ')
-    reg.printValue(value[0],value[1])
+    reg.printValue(value[0], value[1], multiSzSeparator='\n     ')
 
 def enumValues(reg, searchKey):
     key = reg.findKey(searchKey)
@@ -87,7 +87,7 @@ def enumValues(reg, searchKey):
 
     for value in values:
         print("  %-30s: " % value, end=' ')
-        data = reg.getValue('%s\\%s'%(searchKey,value.decode('utf-8')))
+        data = reg.getValue(searchKey, value.decode('utf-8'))
         # Special case for binary string.. so it looks better formatted
         if data[0] == winregistry.REG_BINARY:
             print('')
@@ -117,12 +117,12 @@ def walk(reg, keyName):
 
 
 def main():
-    # Init the example's logger theme
-    logger.init()
     print(version.BANNER)
 
     parser = argparse.ArgumentParser(add_help = True, description = "Reads data from registry hives.")
 
+    parser.add_argument('-debug', action='store_true', help='Turn DEBUG output ON')
+    parser.add_argument('-ts', action='store_true', help='Adds timestamp to every logging output')
     parser.add_argument('hive', action='store', help='registry hive to open')
     subparsers = parser.add_subparsers(help='actions', dest='action')
     # A enum_key command
@@ -151,8 +151,10 @@ def main():
         sys.exit(1)
 
     options = parser.parse_args()
+    # Init the example's logger theme
+    logger.init(options.ts, options.debug)
 
-    reg = winregistry.Registry(options.hive)
+    reg = winregistry.get_registry_parser(options.hive)
 
     if options.action.upper() == 'ENUM_KEY':
         print("[%s]" % options.name)

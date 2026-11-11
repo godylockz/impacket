@@ -1,6 +1,8 @@
 # Impacket - Collection of Python classes for working with network protocols.
 #
-# Copyright (C) 2023 Fortra. All rights reserved.
+# Copyright Fortra, LLC and its affiliated companies 
+#
+# All rights reserved.
 #
 # This software is provided under a slightly modified version
 # of the Apache Software License. See the accompanying LICENSE file
@@ -25,16 +27,15 @@
 #
 
 import struct
-from datetime import datetime
-from ldap3.protocol.formatters.formatters import format_sid
+from datetime import datetime, timedelta
 
 from impacket.dcerpc.v5 import transport
 from impacket.uuid import uuidtup_to_bin, bin_to_string, string_to_bin
 from impacket.dcerpc.v5.ndr import NDR, NDRCALL, NDRSTRUCT, NDRENUM, NDRUNION, NDRUniConformantArray, \
     NDRPOINTER, NDRUniConformantVaryingArray, UNKNOWNDATA
-from impacket.dcerpc.v5.dtypes import NULL, BOOL, BOOLEAN, STR, WSTR, LPWSTR, WIDESTR, RPC_UNICODE_STRING, \
+from impacket.dcerpc.v5.dtypes import NULL, BOOL, BOOLEAN, STR, WSTR, LPWSTR, WIDESTR, \
     LONG, UINT, ULONG, PULONG, LPDWORD, LARGE_INTEGER, DWORD, NDRHYPER, USHORT, UCHAR, PCHAR, BYTE, PBYTE, \
-    UUID, GUID
+    UUID, GUID, SID as BINARY_SID
 from impacket import system_errors
 from impacket.dcerpc.v5.enum import Enum
 from impacket.dcerpc.v5.rpcrt import DCERPCException, RPC_C_AUTHN_GSS_NEGOTIATE, RPC_C_AUTHN_LEVEL_PKT_PRIVACY
@@ -48,6 +49,7 @@ TermSrvNotification_UUID = uuidtup_to_bin(('11899a43-2b68-4a76-92e3-a3d6ad8c26ce
 TermSrvEnumeration_UUID  = uuidtup_to_bin(('88143fd0-c28d-4b2b-8fef-8d882f6a9390','1.0'))
 RCMPublic_UUID           = uuidtup_to_bin(('bde95fdf-eee0-45de-9e12-e5a61cd0d4fe','1.0'))
 RcmListener_UUID         = uuidtup_to_bin(('497d95a6-2d27-4bf5-9bbd-a6046957133c','1.0'))
+SessEnvPublicRpc_UUID    = uuidtup_to_bin(('1257b580-ce2f-4109-82d6-a9459d0bf6bc','1.0'))
 LegacyAPI_UUID           = uuidtup_to_bin(('5ca4a760-ebb1-11cf-8611-00a0245420ed','1.0'))
 
 AUDIODRIVENAME_LENGTH                = 9
@@ -177,7 +179,7 @@ class TS_CHAR(STR):
 class SYSTEM_TIMESTAMP(NDRHYPER):
     def __getitem__(self, key):
         if key == 'Data':
-            return datetime.fromtimestamp(getUnixTime(int(str(self.fields[key]))))
+            return datetime(1601, 1, 1) + timedelta(microseconds=int(str(self.fields[key])) // 10)
         else:
             return NDR.__getitem__(self,key)
 
@@ -200,6 +202,18 @@ class TS_UNICODE_STRING(NDRSTRUCT):
         ('MaximumLength', USHORT),
         ('Buffer', LPWSTR),
     )
+    def getValue(self):
+        # [MS-TSTS] 2.2.2.15.1.1 TS_UNICODE_STRING / [MS-DTYP] RPC_UNICODE_STRING:
+        # a null PWSTR means there is no string buffer to decode, so expose ''.
+        if self.fields['Buffer'].fields['ReferentID'] == 0:
+            return ''
+        rawBuffer = self.fields['Buffer'].fields['Data'].fields['Data']
+        value = rawBuffer[:self['Length']].decode('utf-16le')
+        # Some servers appear to count the terminating UTF-16 NUL inside Length
+        # even though UNICODE_STRING semantics say the logical value excludes it.
+        if value.endswith('\x00'):
+            return value[:-1]
+        return value
 
 class TS_LPCHAR(NDRPOINTER):
     referent = (
@@ -254,6 +268,7 @@ class LPUCHAR_ARRAY(NDRPOINTER):
     referent = (
         ('Data', UCHAR_ARRAY),
     )
+
 class WCHAR_ARRAY_32(WIDESTR_STRIPPED):
     length = 32
 class WCHAR_ARRAY_256(WIDESTR_STRIPPED):
@@ -329,6 +344,12 @@ def getUnixTime(t):
 
 def enum2value(enum, key):
     return enum.enumItems._value2member_map_[key]._name_
+
+
+def binary_sid_to_string(rawSid):
+    if not rawSid:
+        return ''
+    return BINARY_SID(data=rawSid).formatCanonical()
     
 class SID(TS_CHAR):
     def known_sid(self, sid):
@@ -351,9 +372,10 @@ class SID(TS_CHAR):
         elif sid in knownSids:
             return knownSids[sid]
         return sid
+
     def __getitem__(self, key):
         if key == 'Data':
-            sid = format_sid(self.fields[key])
+            sid = binary_sid_to_string(self.fields[key])
             if not len(sid):
                 return ''
             return self.known_sid(sid)
@@ -1311,6 +1333,7 @@ class pResult_ENUM(NDRENUM):
 
 
 # 2.2.2.15.1 TS_SYS_PROCESS_INFORMATION
+# https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-tsts/96702c7d-6f5f-4965-8f29-5fdbea73278e
 class TS_SYS_PROCESS_INFORMATION(NDRSTRUCT):
     structure = (
          ('NextEntryOffset', ULONG),
@@ -1321,7 +1344,7 @@ class TS_SYS_PROCESS_INFORMATION(NDRSTRUCT):
          ('CreateTime', LARGE_INTEGER),
          ('UserTime', LARGE_INTEGER),
          ('KernelTime', LARGE_INTEGER),
-         ('ImageNameSize', RPC_UNICODE_STRING), 
+         ('ImageName', TS_UNICODE_STRING),
          ('BasePriority', LONG),
          ('UniqueProcessId', DWORD),
          ('InheritedFromUniqueProcessId', DWORD),
@@ -1340,8 +1363,6 @@ class TS_SYS_PROCESS_INFORMATION(NDRSTRUCT):
          ('PagefileUsage', ULONG), #SIZE_T
          ('PeakPagefileUsage', ULONG), #SIZE_T
          ('PrivatePageCount', ULONG), #SIZE_T
-         ('ImageName', WSTR_STRIPPED), # THIS SHOULD NOT BE HERE
-         ('pSid', SID), # THIS SHOULD NOT BE HERE
     )
 
 
@@ -1351,15 +1372,24 @@ class PTS_SYS_PROCESS_INFORMATION(NDRPOINTER):
     )
 
 # 2.2.2.15 TS_ALL_PROCESSES_INFO
+# https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-tsts/8f5564a6-1b5e-4381-afc4-4acf7ad39d6d
 class TS_ALL_PROCESSES_INFO(NDRSTRUCT):
     structure = (
-        ('pTsProcessInfo', TS_SYS_PROCESS_INFORMATION),
+        ('pTsProcessInfo', PTS_SYS_PROCESS_INFORMATION),
         ('SizeOfSid', DWORD),
-        ('pSid', TS_CHAR),
+        ('pSid', LPUCHAR_ARRAY),
     )
+    def getProcessInfo(self):
+        return self.fields['pTsProcessInfo'].fields['Data']
+
+    def getSid(self):
+        rawSid = b''.join(self.fields['pSid']['Data']) if self.fields['pSid'].fields['ReferentID'] else b''
+        if not rawSid:
+            return ''
+        return SID().known_sid(binary_sid_to_string(rawSid))
  
-class TS_ALL_PROCESSES_INFO_ARRAY(NDRUniConformantVaryingArray):
-    item = TS_SYS_PROCESS_INFORMATION
+class TS_ALL_PROCESSES_INFO_ARRAY(NDRUniConformantArray):
+    item = TS_ALL_PROCESSES_INFO
 
 class PTS_ALL_PROCESSES_INFO(NDRPOINTER):
     referent = (
@@ -1894,6 +1924,24 @@ class RpcGetRemoteAddress(NDRCALL):
 class RpcGetRemoteAddressResponse(NDRCALL):
     structure = (
         ('pRemoteAddress', RCM_REMOTEADDRESS),
+        ('ErrorCode', ULONG),
+    )
+
+
+# 3.5.4.1.6 RpcShadow2 (Opnum 0)
+class RpcShadow2(NDRCALL):
+    opnum = 0
+    structure = (
+        ('TargetSessionId', ULONG),
+        ('eRequestControl', SHADOW_CONTROL_REQUEST),
+        ('eRequestPermission', SHADOW_PERMISSION_REQUEST),
+        ('cchInvitation', ULONG),
+    )
+
+class RpcShadow2Response(NDRCALL):
+    structure = (
+        ('pePermission', SHADOW_REQUEST_RESPONSE),
+        ('pszInvitation', WSTR),
         ('ErrorCode', ULONG),
     )
 
@@ -2696,6 +2744,7 @@ class RpcWinStationNtsdDebugResponse(NDRCALL):
         ('ErrorCode', BOOLEAN),
     )
 # 3.7.4.1.22 RpcWinStationGetAllProcesses (Opnum 43)
+# https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-tsts/6f43f9e4-2d80-4c5c-bc0b-7f653b1d7c02
 class RpcWinStationGetAllProcesses(NDRCALL):
     opnum = 43
     structure = (
@@ -2708,7 +2757,8 @@ class RpcWinStationGetAllProcessesResponse(NDRCALL):
     structure = (
         ('pResult', pResult_ENUM),
         ('pNumberOfProcesses', BOUNDED_ULONG),
-        ('buffer',':'),
+        ('ppTsAllProcessesInfo', PTS_ALL_PROCESSES_INFO),
+        ('ErrorCode', BOOLEAN),
     )
 # 3.7.4.1.23 RpcWinStationGetProcessSid (Opnum 44)
 class RpcWinStationGetProcessSid(NDRCALL):
@@ -3535,54 +3585,16 @@ def hRpcWinStationTerminateProcess(dce, hServer, ProcessId, ExitCode = 0):
 
 # 3.7.4.1.22 RpcWinStationGetAllProcesses (Opnum 43)
 def hRpcWinStationGetAllProcesses(dce, hServer):
-    # i'm giving up constructing legitimate structures for this method
-    # Going to parse raw response:
-    # 1. Skip ndrpointers
-    # 2. Create TS_SYS_PROCESS_INFORMATION structure one by one
-    # Tested and seems to work well on WIN11, WIN10, WIN2012R2, WIN7
     request = RpcWinStationGetAllProcesses()
     request['hServer'] = hServer
     request['Level'] = 0
     request['pNumberOfProcesses'] = 0x8000
     resp = dce.request(request, checkError=False)
-    data = resp.getData()
-    bResult = bool(data[-1])
-    if not bResult:
+    if not resp['ErrorCode']:
         raise DCERPCSessionError(error_code=resp['pResult'])
-    data = data[:-1]
-    procs = []
     if not resp['pNumberOfProcesses']:
-        return procs
-    offset = 0
-    arrayOffset = 0
-    while 1:
-        offset = data.find(b'\x02\x00')
-        if offset > 12:
-            break
-        data = data[offset+2:]
-        arrayOffset = arrayOffset + offset + 2
-    procInfo = ''
-    while len(data)>1:
-        if len(data[len(procInfo):]) < 16:
-            break
-        # I think there some alignment problems...
-        # in the structure, second DWORD is thread count, i'm looking for the second DWORD
-        # in order to align the data correctly
-        # There is no proper errors handling!
-        b,c,d,e = struct.unpack('<LLLL',data[len(procInfo):len(procInfo)+16])
-        if b:
-            data = data[len(procInfo)-4:]
-        elif c:
-            data = data[len(procInfo):]
-        elif d:
-            data = data[len(procInfo)+4:]
-        elif e:
-            data = data[len(procInfo)+8:]
-            
-        procInfo = TS_SYS_PROCESS_INFORMATION()
-        procInfo.fromString(data)
-        procs.append(procInfo)
-    return procs
+        return []
+    return resp['ppTsAllProcessesInfo']
 
 # 3.7.4.1.23 RpcWinStationGetProcessSid (Opnum 44)
 def hRpcWinStationGetProcessSid(dce, hServer, dwUniqueProcessId, ProcessStartTime):
@@ -3598,7 +3610,7 @@ def hRpcWinStationGetProcessSid(dce, hServer, dwUniqueProcessId, ProcessStartTim
         request['dwSidSize'] = sizeNeeded
         resp = dce.request(request, checkError=False)
     if resp['ErrorCode']:
-        return format_sid(resp['pProcessUserSid'])
+        return binary_sid_to_string(resp['pProcessUserSid'])
 
 #NOT_IMPLEMENTED 3.7.4.1.24 RpcWinStationGetTermSrvCountersValue (Opnum 45)
 
@@ -3661,13 +3673,23 @@ def hRpcWinStationOpenSessionDirectory(dce, hServer, pszServerName):
     request['pszServerName'] = pszServerName
     return dce.request(request, checkError=False)
 
+# 3.10.4.1.1 RpcShadow2 (Opnum 0)
+def hRpcShadow2(dce, TargetSessionId, eRequestControl, eRequestPermission, cchInvitation = 8192):
+        request = RpcShadow2()
+        request['TargetSessionId'] = TargetSessionId
+        request['eRequestControl'] = eRequestControl
+        request['eRequestPermission'] = eRequestPermission
+        request['cchInvitation'] = cchInvitation
+        return dce.request(request, checkError=False)
 
 ################################################################################
 # Initialization Classes and Helper classes
 ################################################################################
 
 class TSTSEndpoint:
-    def __init__(self, smb, target_ip, stringbinding, endpoint, kerberos = False):
+    def __init__(self, smb, target_ip, stringbinding, endpoint, kerberos):
+        self.__doKerberos = kerberos
+        self._target_ip = target_ip
         self._stringbinding = stringbinding.format(target_ip)
         self._endpoint = endpoint
         self._smbconnection = smb
@@ -3679,9 +3701,11 @@ class TSTSEndpoint:
         self._rpctransport = transport.DCERPCTransportFactory(self._stringbinding)
         self._rpctransport.set_smb_connection(self._smbconnection)
         self._dce = self._rpctransport.get_dce_rpc()
-        self._dce.set_credentials(*self._rpctransport.get_credentials())
-        self._dce.connect()
+        if self.__doKerberos:
+            self._dce.set_auth_type(RPC_C_AUTHN_GSS_NEGOTIATE)
         self._dce.set_auth_level(RPC_C_AUTHN_LEVEL_PKT_PRIVACY)
+
+        self._dce.connect()
         self._dce.bind(self._endpoint)
         return self._dce
     def _disconnect(self):
@@ -3692,10 +3716,11 @@ class TSTSEndpoint:
         self._disconnect()
 
 class TermSrvSession(TSTSEndpoint):
-    def __init__(self, smb, target_ip):
+    def __init__(self, smb, target_ip, kerberos):
         super().__init__(smb, target_ip,
                             stringbinding = r'ncacn_np:{}[\pipe\LSM_API_service]',
-                            endpoint = TermSrvSession_UUID
+                            endpoint = TermSrvSession_UUID,
+                            kerberos = kerberos
         )
     hRpcOpenSession             = hRpcOpenSession
     hRpcCloseSession            = hRpcCloseSession
@@ -3715,10 +3740,11 @@ class TermSrvSession(TSTSEndpoint):
     hRpcGetSessionInformationEx = hRpcGetSessionInformationEx
 
 class TermSrvNotification(TSTSEndpoint):
-    def __init__(self, smb, target_ip):
+    def __init__(self, smb, target_ip, kerberos):
         super().__init__(smb, target_ip,
                             stringbinding = r'ncacn_np:{}[\pipe\LSM_API_service]',
-                            endpoint = TermSrvNotification_UUID
+                            endpoint = TermSrvNotification_UUID,
+                            kerberos = kerberos
         )
     hRpcWaitForSessionState         = hRpcWaitForSessionState
     hRpcRegisterAsyncNotification   = hRpcRegisterAsyncNotification
@@ -3726,10 +3752,11 @@ class TermSrvNotification(TSTSEndpoint):
     hRpcUnRegisterAsyncNotification = hRpcUnRegisterAsyncNotification
 
 class TermSrvEnumeration(TSTSEndpoint):
-    def __init__(self, smb, target_ip):
+    def __init__(self, smb, target_ip, kerberos):
         super().__init__(smb, target_ip,
                             stringbinding = r'ncacn_np:{}[\pipe\LSM_API_service]',
-                            endpoint      = TermSrvEnumeration_UUID
+                            endpoint      = TermSrvEnumeration_UUID,
+                            kerberos = kerberos
         )
     hRpcOpenEnum        = hRpcOpenEnum
     hRpcCloseEnum       = hRpcCloseEnum
@@ -3738,10 +3765,11 @@ class TermSrvEnumeration(TSTSEndpoint):
     hRpcGetAllSessions  = hRpcGetAllSessions
 
 class RCMPublic(TSTSEndpoint):
-    def __init__(self, smb, target_ip):
+    def __init__(self, smb, target_ip, kerberos):
         super().__init__(smb, target_ip,
                             stringbinding = r'ncacn_np:{}[\pipe\TermSrv_API_service]',
-                            endpoint = RCMPublic_UUID
+                            endpoint = RCMPublic_UUID,
+                            kerberos = kerberos
         )
     hRpcGetClientData    = hRpcGetClientData
     hRpcGetConfigData    = hRpcGetConfigData
@@ -3751,10 +3779,11 @@ class RCMPublic(TSTSEndpoint):
 
 
 class RcmListener(TSTSEndpoint):
-    def __init__(self, smb, target_ip):
+    def __init__(self, smb, target_ip, kerberos):
         super().__init__(smb, target_ip,
                             stringbinding = r'ncacn_np:{}[\pipe\TermSrv_API_service]',
-                            endpoint = RcmListener_UUID
+                            endpoint = RcmListener_UUID,
+                            kerberos = kerberos
         )
     hRpcOpenListener  = hRpcOpenListener
     hRpcCloseListener = hRpcCloseListener
@@ -3762,11 +3791,23 @@ class RcmListener(TSTSEndpoint):
     hRpcStartListener = hRpcStartListener
     hRpcIsListening   = hRpcIsListening
 
+class SessEnvPublicRpc(TSTSEndpoint):
+    def __init__(self, smb, target_ip, kerberos):
+        super().__init__(smb, target_ip,
+                            stringbinding = r'ncacn_np:{}[\pipe\SessEnvPublicRpc]',
+                            endpoint = SessEnvPublicRpc_UUID,
+                            kerberos = kerberos
+        )
+
+    hRpcShadow2       = hRpcShadow2
+
+
 class LegacyAPI(TSTSEndpoint):
-    def __init__(self, smb, target_ip):
+    def __init__(self, smb, target_ip, kerberos):
         super().__init__(smb, target_ip,
                             stringbinding = r'ncacn_np:{}[\pipe\Ctx_WinStation_API_service]',
-                            endpoint = LegacyAPI_UUID
+                            endpoint = LegacyAPI_UUID,
+                            kerberos = kerberos
         )
     hRpcWinStationOpenServer             = hRpcWinStationOpenServer
     hRpcWinStationCloseServer            = hRpcWinStationCloseServer

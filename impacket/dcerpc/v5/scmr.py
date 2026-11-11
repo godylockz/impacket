@@ -1,6 +1,8 @@
 # Impacket - Collection of Python classes for working with network protocols.
 #
-# Copyright (C) 2023 Fortra. All rights reserved.
+# Copyright Fortra, LLC and its affiliated companies 
+#
+# All rights reserved.
 #
 # This software is provided under a slightly modified version
 # of the Apache Software License. See the accompanying LICENSE file
@@ -178,12 +180,13 @@ SERVICE_STOP_PLANNED   =  0x40000000
 SERVICE_STOP_UNPLANNED =  0x10000000
 
 # SERVICE_TRIGGER triggers
-SERVICE_TRIGGER_TYPE_DEVICE_INTERFACE_ARRIVAL  = 0x00000001
-SERVICE_TRIGGER_TYPE_IP_ADDRESS_AVAILABILITY   = 0x00000002
-SERVICE_TRIGGER_TYPE_DOMAIN_JOIN               = 0x00000003
-SERVICE_TRIGGER_TYPE_FIREWALL_PORT_EVENT       = 0x00000004
-SERVICE_TRIGGER_TYPE_GROUP_POLICY              = 0x00000005
-SERVICE_TRIGGER_TYPE_CUSTOM                    = 0x00000020
+SERVICE_TRIGGER_TYPE_DEVICE_INTERFACE_ARRIVAL  = 1
+SERVICE_TRIGGER_TYPE_IP_ADDRESS_AVAILABILITY   = 2
+SERVICE_TRIGGER_TYPE_DOMAIN_JOIN               = 3
+SERVICE_TRIGGER_TYPE_FIREWALL_PORT_EVENT       = 4
+SERVICE_TRIGGER_TYPE_GROUP_POLICY              = 5
+SERVICE_TRIGGER_TYPE_NETWORK_ENDPOINT          = 6
+SERVICE_TRIGGER_TYPE_CUSTOM                    = 20
 
 # SERVICE_TRIGGER actions
 SERVICE_TRIGGER_ACTION_SERVICE_START = 0x00000001
@@ -205,6 +208,41 @@ SERVICE_TRIGGER_DATA_TYPE_STRING      = 0x00000002
 SERVICE_TRIGGER_DATA_TYPE_LEVEL       = 0x00000003
 SERVICE_TRIGGER_DATA_TYPE_KEYWORD_ANY = 0x00000004
 SERVICE_TRIGGER_DATA_TYPE_KEYWORD_ALL = 0x00000005
+
+# RCreateWowService dwServiceWowType dataTypes (https://learn.microsoft.com/ko-kr/openspecs/windows_protocols/ms-scmr/b0d95ad9-30f3-4df0-998d-d43fe8ea580c#Appendix_A_Target_84)
+IMAGE_FILE_MACHINE_UNKNOWN            = 0x0
+IMAGE_FILE_MACHINE_TARGET_HOST        = 0x0001
+IMAGE_FILE_MACHINE_I386               = 0x014c
+IMAGE_FILE_MACHINE_R3000BE            = 0x0160
+IMAGE_FILE_MACHINE_R3000              = 0x0162
+IMAGE_FILE_MACHINE_R4000              = 0x0166
+IMAGE_FILE_MACHINE_R10000             = 0x0168
+IMAGE_FILE_MACHINE_WCEMIPSV2          = 0x0169
+IMAGE_FILE_MACHINE_ALPHA              = 0x0184
+IMAGE_FILE_MACHINE_SH3                = 0x01a2
+IMAGE_FILE_MACHINE_SH3DSP             = 0x01a3
+IMAGE_FILE_MACHINE_SH3E               = 0x01a4
+IMAGE_FILE_MACHINE_SH4                = 0x01a6
+IMAGE_FILE_MACHINE_SH5                = 0x01a8
+IMAGE_FILE_MACHINE_ARM                = 0x01c0
+IMAGE_FILE_MACHINE_THUMB              = 0x01c2
+IMAGE_FILE_MACHINE_ARMNT              = 0x01c4
+IMAGE_FILE_MACHINE_AM33               = 0x01d3
+IMAGE_FILE_MACHINE_POWERPC            = 0x01F0
+IMAGE_FILE_MACHINE_POWERPCFP          = 0x01f1
+IMAGE_FILE_MACHINE_IA64               = 0x0200
+IMAGE_FILE_MACHINE_MIPS16             = 0x0266
+IMAGE_FILE_MACHINE_ALPHA64            = 0x0284
+IMAGE_FILE_MACHINE_MIPSFPU            = 0x0366
+IMAGE_FILE_MACHINE_MIPSFPU16          = 0x0466
+IMAGE_FILE_MACHINE_AXP64              = 0x0284
+IMAGE_FILE_MACHINE_TRICORE            = 0x0520
+IMAGE_FILE_MACHINE_CEF                = 0x0CEF
+IMAGE_FILE_MACHINE_EBC                = 0x0EBC
+IMAGE_FILE_MACHINE_AMD64              = 0x8664
+IMAGE_FILE_MACHINE_M32R               = 0x9041
+IMAGE_FILE_MACHINE_ARM64              = 0xAA64
+IMAGE_FILE_MACHINE_CEE                = 0xC0EE
 
 ################################################################################
 # STRUCTURES
@@ -336,15 +374,16 @@ class SC_ACTION(NDRSTRUCT):
         ('Delay', DWORD) , 
     )
 
-class SC_ACTIONS(NDRSTRUCT):
-    structure = (
-       ('Data', NDRUniConformantArray),
+# https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-scmr/58032b71-1e5c-4f2e-8545-34b0f2e8c6ad
+# https://learn.microsoft.com/en-us/windows/win32/api/winsvc/ns-winsvc-sc_action
+class SC_ACTION_ARRAY(NDRUniConformantArray):
+    item = SC_ACTION
+
+# Helper for the [size_is(cActions)] SC_ACTION* field.
+class SC_ACTIONS(NDRPOINTER):
+    referent = (
+        ('Data', SC_ACTION_ARRAY),
     )
-    def __init__(self, data = None, isNDR64 = False):
-        NDR.__init__(self,None,isNDR64)
-        self.fields['Data'].item = SC_ACTION
-        if data is not None:
-            self.fromString(data)
 
 class SERVICE_FAILURE_ACTIONSW(NDRSTRUCT):
     structure = (
@@ -354,6 +393,25 @@ class SERVICE_FAILURE_ACTIONSW(NDRSTRUCT):
         ('cActions', DWORD) , 
         ('lpsaActions', SC_ACTIONS) , 
     )
+
+    def __init__(self, data=None, isNDR64=False):
+        NDRSTRUCT.__init__(self, data, isNDR64=isNDR64)
+        if data is None:
+            self['lpsaActions'] = NULL
+
+    def __setitem__(self, key, value):
+        if key == 'lpsaActions' and isinstance(value, SC_ACTIONS):
+            self.fields[key] = value
+            return
+        return NDRSTRUCT.__setitem__(self, key, value)
+
+    # Keep cActions synchronized with the pointed SC_ACTION array at marshal time.
+    def getData(self, soFar=0):
+        if self['lpsaActions'] == 0:
+            self['cActions'] = 0
+        else:
+            self['cActions'] = len(self['lpsaActions'])
+        return NDR.getData(self, soFar)
 
 class LPSERVICE_FAILURE_ACTIONSW(NDRPOINTER):
     referent = (
@@ -685,7 +743,7 @@ class RSetServiceObjectSecurity(NDRCALL):
     structure = (
         ('hService',SC_RPC_HANDLE),
         ('dwSecurityInformation',SECURITY_INFORMATION),
-        ('lpSecurityDescriptor',LPBYTE),
+        ('lpSecurityDescriptor',BYTE_ARRAY),
         ('cbBufSize',DWORD),
     )
 
@@ -788,7 +846,7 @@ class RCreateServiceW(NDRCALL):
 
 class RCreateServiceWResponse(NDRCALL):
     structure = (
-        ('lpdwTagId',LPWSTR),
+        ('lpdwTagId',LPDWORD),
         ('lpServiceHandle',SC_RPC_HANDLE),
         ('ErrorCode', DWORD),
     )
@@ -1032,7 +1090,7 @@ class RCreateServiceWOW64W(NDRCALL):
 
 class RCreateServiceWOW64WResponse(NDRCALL):
     structure = (
-        ('lpdwTagId',LPWSTR),
+        ('lpdwTagId',LPDWORD),
         ('lpServiceHandle',SC_RPC_HANDLE),
         ('ErrorCode', DWORD),
     )
@@ -1110,6 +1168,49 @@ class RQueryServiceConfigExResponse(NDRCALL):
         ('ErrorCode', DWORD),
     )
 
+class RCreateWowService(NDRCALL):
+    opnum = 60
+    structure = (
+        ('hSCManager',SC_RPC_HANDLE),
+        ('lpServiceName',WSTR),
+        ('lpDisplayName',LPWSTR),
+        ('dwDesiredAccess',DWORD),
+        ('dwServiceType',DWORD),
+        ('dwStartType',DWORD),
+        ('dwErrorControl',DWORD),
+        ('lpBinaryPathName',WSTR),
+        ('lpLoadOrderGroup',LPWSTR),
+        ('lpdwTagId',LPDWORD),
+        ('lpDependencies',LPBYTE),
+        ('dwDependSize',DWORD),
+        ('lpServiceStartName',LPWSTR),
+        ('lpPassword',LPBYTE),
+        ('dwPwSize',DWORD),
+        ('dwServiceWowType',USHORT),
+    )
+
+
+class RCreateWowServiceResponse(NDRCALL):
+    structure = (
+        ('lpdwTagId',LPDWORD),
+        ('lpServiceHandle',SC_RPC_HANDLE),
+        ('ErrorCode', DWORD),
+    )
+
+
+class ROpenSCManager2(NDRCALL):
+    opnum = 64
+    structure = (
+        ('lpDatabaseName', LPWSTR),
+        ('dwDesiredAccess', DWORD),
+    )
+
+class ROpenSCManager2Response(NDRCALL):
+    structure = (
+        ('lpScHandle', SC_RPC_HANDLE),
+        ('ReturnCode', DWORD),
+    )
+
 ################################################################################
 # OPNUMs and their corresponding structures
 ################################################################################
@@ -1146,6 +1247,8 @@ OPNUMS = {
 49 : (RCloseNotifyHandle, RCloseNotifyHandleResponse),
 51 : (RControlServiceExW, RControlServiceExWResponse),
 56 : (RQueryServiceConfigEx, RQueryServiceConfigExResponse),
+60 : (RCreateWowService, RCreateWowServiceResponse),
+64 : (ROpenSCManager2, ROpenSCManager2Response),
 }
 
 ################################################################################
@@ -1202,6 +1305,7 @@ def hRSetServiceObjectSecurity(dce, hService, dwSecurityInformation, lpSecurityD
     request = RSetServiceObjectSecurity()
     request['hService'] = hService
     request['dwSecurityInformation'] = dwSecurityInformation
+    request['lpSecurityDescriptor'] = lpSecurityDescriptor
     request['cbBufSize'] = cbBufSize
     return dce.request(request)
 
@@ -1264,6 +1368,30 @@ def hRCreateServiceW(dce, hSCManager, lpServiceName, lpDisplayName, dwDesiredAcc
     createService['lpPassword'] = lpPassword
     createService['dwPwSize'] = dwPwSize
     return dce.request(createService)
+
+def hRCreateWowServiceW(dce, hSCManager, lpServiceName, lpDisplayName, dwDesiredAccess=SERVICE_ALL_ACCESS,
+                        dwServiceType=SERVICE_WIN32_OWN_PROCESS, dwStartType=SERVICE_AUTO_START, dwErrorControl=SERVICE_ERROR_IGNORE,
+                        lpBinaryPathName=NULL, lpLoadOrderGroup=NULL, lpdwTagId=NULL, lpDependencies=NULL, dwDependSize=0, lpServiceStartName=NULL,
+                        lpPassword=NULL, dwPwSize=0, dwServiceWowType: int=IMAGE_FILE_MACHINE_AMD64):
+    createService = RCreateWowService()
+    createService['hSCManager'] = hSCManager
+    createService['lpServiceName'] = checkNullString(lpServiceName)
+    createService['lpDisplayName'] = checkNullString(lpDisplayName)
+    createService['dwDesiredAccess'] = dwDesiredAccess
+    createService['dwServiceType'] = dwServiceType
+    createService['dwStartType'] = dwStartType
+    createService['dwErrorControl'] = dwErrorControl
+    createService['lpBinaryPathName'] = checkNullString(lpBinaryPathName)
+    createService['lpLoadOrderGroup'] = checkNullString(lpLoadOrderGroup)
+    createService['lpdwTagId'] = lpdwTagId
+    createService['lpDependencies'] = lpDependencies
+    createService['dwDependSize'] = dwDependSize
+    createService['lpServiceStartName'] = checkNullString(lpServiceStartName)
+    createService['lpPassword'] = lpPassword
+    createService['dwPwSize'] = dwPwSize
+    createService['dwServiceWowType'] = dwServiceWowType
+    return dce.request(createService)
+
 
 def hREnumDependentServicesW(dce, hService, dwServiceState, cbBufSize ):
     enumDependentServices = REnumDependentServicesW()
@@ -1333,6 +1461,12 @@ def hREnumServicesStatusW(dce, hSCManager, dwServiceType=SERVICE_WIN32_OWN_PROCE
 def hROpenSCManagerW(dce, lpMachineName='DUMMY\x00', lpDatabaseName='ServicesActive\x00', dwDesiredAccess=SERVICE_START | SERVICE_STOP | SERVICE_CHANGE_CONFIG | SERVICE_QUERY_CONFIG | SERVICE_QUERY_STATUS | SERVICE_ENUMERATE_DEPENDENTS | SC_MANAGER_ENUMERATE_SERVICE):
     openSCManager = ROpenSCManagerW()
     openSCManager['lpMachineName'] = checkNullString(lpMachineName)
+    openSCManager['lpDatabaseName'] = checkNullString(lpDatabaseName)
+    openSCManager['dwDesiredAccess'] = dwDesiredAccess
+    return dce.request(openSCManager)
+
+def hROpenSCManager2(dce, lpDatabaseName=NULL, dwDesiredAccess: int=SERVICE_START | SERVICE_STOP | SERVICE_CHANGE_CONFIG | SERVICE_QUERY_CONFIG | SERVICE_QUERY_STATUS | SERVICE_ENUMERATE_DEPENDENTS | SC_MANAGER_ENUMERATE_SERVICE):
+    openSCManager = ROpenSCManager2()
     openSCManager['lpDatabaseName'] = checkNullString(lpDatabaseName)
     openSCManager['dwDesiredAccess'] = dwDesiredAccess
     return dce.request(openSCManager)

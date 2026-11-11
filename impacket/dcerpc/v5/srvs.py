@@ -1,6 +1,8 @@
 # Impacket - Collection of Python classes for working with network protocols.
 #
-# Copyright (C) 2023 Fortra. All rights reserved.
+# Copyright Fortra, LLC and its affiliated companies 
+#
+# All rights reserved.
 #
 # This software is provided under a slightly modified version
 # of the Apache Software License. See the accompanying LICENSE file
@@ -21,8 +23,6 @@
 # Author:
 #   Alberto Solino (@agsolino)
 #
-from __future__ import division
-from __future__ import print_function
 from impacket.dcerpc.v5.rpcrt import DCERPCException
 from impacket.dcerpc.v5.ndr import NDRCALL, NDR, NDRSTRUCT, NDRUNION, NDRPOINTER, NDRUniConformantArray, \
     NDRUniFixedArray, NDRBOOLEAN, NDRUniConformantVaryingArray, PNDRUniConformantArray
@@ -1768,11 +1768,10 @@ class WCHAR_ARRAY(NDRSTRUCT):
 
     def __setitem__(self, key, value):
         if key == 'Data':
-            try:
-                self.fields[key] = value.encode('utf-16le')
-            except UnicodeDecodeError:
+            if isinstance(value, bytes):
                 import sys
-                self.fields[key] = value.decode(sys.getfilesystemencoding()).encode('utf-16le')
+                value = value.decode(sys.getfilesystemencoding())
+            self.fields[key] = value.encode('utf-16le')
             self.fields['ActualCount'] = None
             self.data = None        # force recompute
         else:

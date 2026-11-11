@@ -1,7 +1,9 @@
 #!/usr/bin/env python
 # Impacket - Collection of Python classes for working with network protocols.
 #
-# Copyright (C) 2023 Fortra. All rights reserved.
+# Copyright Fortra, LLC and its affiliated companies 
+#
+# All rights reserved.
 #
 # This software is provided under a slightly modified version
 # of the Apache Software License. See the accompanying LICENSE file
@@ -26,8 +28,6 @@
 #   [MS-RRP]
 #
 
-from __future__ import division
-from __future__ import print_function
 import argparse
 import codecs
 import logging
@@ -42,6 +42,7 @@ from impacket.examples import logger
 from impacket.examples.utils import parse_target
 from impacket.system_errors import ERROR_NO_MORE_ITEMS
 from impacket.structure import hexdump
+from impacket.winregistry import format_multi_sz
 from impacket.smbconnection import SMBConnection, SessionError
 from impacket.dcerpc.v5.dtypes import READ_CONTROL
 
@@ -184,13 +185,13 @@ class RegHandler:
             if self.__action == 'QUERY':
                 self.query(dce, self.__options.keyName)
             elif self.__action == 'ADD':
-                self.add(dce, self.__options.keyName)
+                self.add(dce, self.__options.keyName, self.__options.persistent)
             elif self.__action == 'DELETE':
                 self.delete(dce, self.__options.keyName)
             elif self.__action == 'SAVE':
                 self.save(dce, self.__options.keyName)
             elif self.__action == 'BACKUP':
-                for hive in ["HKLM\SAM", "HKLM\SYSTEM", "HKLM\SECURITY"]:
+                for hive in ["HKLM\\SAM", "HKLM\\SYSTEM", "HKLM\\SECURITY"]:
                     self.save(dce, hive)
             else:
                 logging.error('Method %s not implemented yet!' % self.__action)
@@ -215,8 +216,8 @@ class RegHandler:
 
     def save(self, dce, keyName):
         hRootKey, subKey = self.__strip_root_key(dce, keyName)
-        outputFileName = "%s\%s.save" % (self.__options.outputPath, subKey)
-        logging.debug("Dumping %s, be patient it can take a while for large hives (e.g. HKLM\SYSTEM)" % keyName)
+        outputFileName = "%s\\%s.save" % (self.__options.outputPath, subKey)
+        logging.debug("Dumping %s, be patient it can take a while for large hives (e.g. HKLM\\SYSTEM)" % keyName)
         try:
             ans2 = rrp.hBaseRegOpenKey(dce, hRootKey, subKey, dwOptions=rrp.REG_OPTION_BACKUP_RESTORE | rrp.REG_OPTION_OPEN_LINK, samDesired=rrp.KEY_READ)
             rrp.hBaseRegSaveKey(dce, ans2['phkResult'], outputFileName)
@@ -233,11 +234,11 @@ class RegHandler:
         if self.__options.v:
             print(keyName)
             value = rrp.hBaseRegQueryValue(dce, ans2['phkResult'], self.__options.v)
-            print('\t' + self.__options.v + '\t' + self.__regValues.get(value[0], 'KEY_NOT_FOUND') + '\t', str(value[1]))
+            self.__print_query_value(self.__options.v, value[0], value[1])
         elif self.__options.ve:
             print(keyName)
             value = rrp.hBaseRegQueryValue(dce, ans2['phkResult'], '')
-            print('\t' + '(Default)' + '\t' + self.__regValues.get(value[0], 'KEY_NOT_FOUND') + '\t', str(value[1]))
+            self.__print_query_value('(Default)', value[0], value[1])
         elif self.__options.s:
             self.__print_all_subkeys_and_entries(dce, subKey + '\\', ans2['phkResult'], 0)
         else:
@@ -254,8 +255,9 @@ class RegHandler:
                     # ans5 = rrp.hBaseRegGetVersion(rpc, ans2['phkResult'])
                     # ans3 = rrp.hBaseRegEnumKey(rpc, ans2['phkResult'], 0)
 
-    def add(self, dce, keyName):
+    def add(self, dce, keyName, persistent):
         hRootKey, subKey = self.__strip_root_key(dce, keyName)
+
 
         # READ_CONTROL | rrp.KEY_SET_VALUE | rrp.KEY_CREATE_SUB_KEY should be equal to KEY_WRITE (0x20006)
         if self.__options.v is None: # Try to create subkey
@@ -267,10 +269,19 @@ class RegHandler:
 
             # Should I use ans2?
 
+            # Convert persistant flag into the relevant dwOption.
+            # dwOption 0 = Persistent
+            # dwOption 1 = Volatile
+            dwOption = 0x00000001
+            if persistent is True:
+                dwOption = 0x00000000
+            else:
+                print('[!] The created key is volatile and will not remain after a reboot. ')
+
             ans3 = rrp.hBaseRegCreateKey(
-                dce, hRootKey, subKeyCreate,
-                samDesired=READ_CONTROL | rrp.KEY_SET_VALUE | rrp.KEY_CREATE_SUB_KEY
-            )
+                dce, hRootKey, subKeyCreate, dwOptions=dwOption,
+                samDesired=READ_CONTROL | rrp.KEY_SET_VALUE | rrp.KEY_CREATE_SUB_KEY)
+
             if ans3['ErrorCode'] == 0:
                 print('Successfully set subkey %s' % (
                     keyName
@@ -291,29 +302,36 @@ class RegHandler:
                 raise Exception('Error parsing value type %s' % self.__options.vt)
 
             #Fix (?) for packValue function
-            if dwType in (
-                rrp.REG_DWORD, rrp.REG_DWORD_BIG_ENDIAN, rrp.REG_DWORD_LITTLE_ENDIAN,
-                rrp.REG_QWORD, rrp.REG_QWORD_LITTLE_ENDIAN
-            ):
-                valueData = int(self.__options.vd)
-            elif dwType == rrp.REG_BINARY:
-                bin_value_len = len(self.__options.vd)
-                bin_value_len += (bin_value_len & 1)
-                valueData = binascii.a2b_hex(self.__options.vd.ljust(bin_value_len, '0'))
+            if dwType == rrp.REG_MULTI_SZ:
+                vd = '\0'.join(self.__options.vd)
+                valueData = vd + 2 * '\0' # REG_MULTI_SZ ends with 2 null-bytes
+                valueDataToPrint = format_multi_sz(valueData, separator='\n\t\t')
             else:
-                valueData = self.__options.vd
+                vd = self.__options.vd[0] if len(self.__options.vd) > 0 else ''
+                if dwType in (
+                    rrp.REG_DWORD, rrp.REG_DWORD_BIG_ENDIAN, rrp.REG_DWORD_LITTLE_ENDIAN,
+                    rrp.REG_QWORD, rrp.REG_QWORD_LITTLE_ENDIAN
+                ):
+                    valueData = int(vd)
+                elif dwType == rrp.REG_BINARY:
+                    bin_value_len = len(vd)
+                    bin_value_len += (bin_value_len & 1)
+                    valueData = binascii.a2b_hex(vd.ljust(bin_value_len, '0'))
+                else:
+                    valueData = vd + "\0" # Add a NULL Byte as terminator for Non Binary values
+                valueDataToPrint = valueData
 
             ans3 = rrp.hBaseRegSetValue(
                 dce, ans2['phkResult'], self.__options.v, dwType, valueData
             )
 
             if ans3['ErrorCode'] == 0:
-                print('Successfully set key %s\\%s of type %s to value %s' % (
-                    keyName, self.__options.v, self.__options.vt, valueData
+                print('Successfully set\n\tkey\t%s\\%s\n\ttype\t%s\n\tvalue\t%s' % (
+                    keyName, self.__options.v, self.__options.vt, valueDataToPrint
                 ))
             else:
-                print('Error 0x%08x while setting key %s\\%s of type %s to value %s' % (
-                    ans3['ErrorCode'], keyName, self.__options.v, self.__options.vt, valueData
+                print('Error 0x%08x while setting\n\tkey\t%s\\%s\n\ttype\t%s\n\tvalue\t%s' % (
+                    ans3['ErrorCode'], keyName, self.__options.v, self.__options.vt, valueDataToPrint
                 ))
 
     def delete(self, dce, keyName):
@@ -452,7 +470,10 @@ class RegHandler:
                 lp_type = ans4['lpType']
                 lp_data = b''.join(ans4['lpData'])
                 print('\t' + lp_value_name + '\t' + self.__regValues.get(lp_type, 'KEY_NOT_FOUND') + '\t', end=' ')
-                self.__parse_lp_data(lp_type, lp_data)
+                separator = '\n\t%s\t%s\t ' % (
+                    ' ' * len(lp_value_name), ' ' * len(self.__regValues.get(lp_type, 'KEY_NOT_FOUND'))
+                )
+                self.__parse_lp_data(lp_type, lp_data, separator)
                 i += 1
             except rrp.DCERPCSessionError as e:
                 if e.get_error_code() == ERROR_NO_MORE_ITEMS:
@@ -483,7 +504,21 @@ class RegHandler:
                 raise
 
     @staticmethod
-    def __parse_lp_data(valueType, valueData):
+    def __format_query_value(valueType, valueData, multiSzSeparator):
+        if valueType == rrp.REG_MULTI_SZ:
+            return format_multi_sz(valueData, separator=multiSzSeparator)
+        return str(valueData)
+
+    def __print_query_value(self, valueName, valueType, valueData):
+        valueTypeName = self.__regValues.get(valueType, 'KEY_NOT_FOUND')
+        # REG_MULTI_SZ values continue on later lines. Keep the existing tabular
+        # query output by replacing the value name/type columns with spaces.
+        separator = '\n\t%s\t%s\t ' % (' ' * len(valueName), ' ' * len(valueTypeName))
+        print('\t' + valueName + '\t' + valueTypeName + '\t',
+              self.__format_query_value(valueType, valueData, separator))
+
+    @staticmethod
+    def __parse_lp_data(valueType, valueData, multiSzSeparator='\n\t\t'):
         try:
             if valueType == rrp.REG_SZ or valueType == rrp.REG_EXPAND_SZ:
                 if type(valueData) is int:
@@ -507,7 +542,7 @@ class RegHandler:
                 except:
                     print(" NULL")
             elif valueType == rrp.REG_MULTI_SZ:
-                print("%s" % (valueData.decode('utf-16le')[:-2]))
+                print("%s" % format_multi_sz(valueData, separator=multiSzSeparator))
             else:
                 print("Unknown Type 0x%x!" % valueType)
                 hexdump(valueData)
@@ -519,8 +554,6 @@ class RegHandler:
 
 if __name__ == '__main__':
 
-    # Init the example's logger theme
-    logger.init()
     # Explicitly changing the stdout encoding format
     if sys.stdout.encoding is None:
         # Output is redirected to a file
@@ -531,6 +564,7 @@ if __name__ == '__main__':
 
     parser.add_argument('target', action='store', help='[[domain/]username[:password]@]<targetName or address>')
     parser.add_argument('-debug', action='store_true', help='Turn DEBUG output ON')
+    parser.add_argument('-ts', action='store_true', help='Adds timestamp to every logging output')
     subparsers = parser.add_subparsers(help='actions', dest='action')
 
     # A query command
@@ -554,13 +588,16 @@ if __name__ == '__main__':
                                    'keyName must include a valid root key. Valid root keys for the local computer are: HKLM,'
                                    ' HKU, HKCU, HKCR.')
     add_parser.add_argument('-v', action='store', metavar="VALUENAME", required=False, help='Specifies the registry '
-                           'value name that is to be set.')
+                           'value name that is to be set. Set to "" to write the (Default) value')
     add_parser.add_argument('-vt', action='store', metavar="VALUETYPE", required=False, help='Specifies the registry '
                            'type name that is to be set. Default is REG_SZ. Valid types are: REG_NONE, REG_SZ, REG_EXPAND_SZ, '
                            'REG_BINARY, REG_DWORD, REG_DWORD_BIG_ENDIAN, REG_LINK, REG_MULTI_SZ, REG_QWORD',
                             default='REG_SZ')
-    add_parser.add_argument('-vd', action='store', metavar="VALUEDATA", required=False, help='Specifies the registry '
-                           'value data that is to be set.', default='')
+    add_parser.add_argument('-vd', action='append', metavar="VALUEDATA", required=False, help='Specifies the registry '
+                           'value data that is to be set. In case of adding a REG_MULTI_SZ value, set this option once for each '
+                           'line you want to add.', default=[])
+    add_parser.add_argument('--persistent', action='store_true', required=False, help='Specify that the created key is intended to be persistent '
+                            'through reboot. Default is volatile key creation')
 
     # An delete command
     delete_parser = subparsers.add_parser('delete', help='Deletes a subkey or entries from the registry')
@@ -584,11 +621,11 @@ if __name__ == '__main__':
                                help='Specifies the full path of the subkey. The '
                                     'keyName must include a valid root key. Valid root keys for the local computer are: HKLM,'
                                     ' HKU, HKCU, HKCR.')
-    save_parser.add_argument('-o', dest='outputPath', action='store', metavar='\\\\192.168.0.2\share', required=True, help='Output UNC path the target system must export the registry saves to')
+    save_parser.add_argument('-o', dest='outputPath', action='store', metavar='\\\\192.168.0.2\\share', required=True, help='Output UNC path the target system must export the registry saves to')
 
     # A special backup command to save HKLM\SAM, HKLM\SYSTEM and HKLM\SECURITY
-    backup_parser = subparsers.add_parser('backup', help='(special command) Backs up HKLM\SAM, HKLM\SYSTEM and HKLM\SECURITY to a specified file.')
-    backup_parser.add_argument('-o', dest='outputPath', action='store', metavar='\\\\192.168.0.2\share', required=True,
+    backup_parser = subparsers.add_parser('backup', help='(special command) Backs up HKLM\\SAM, HKLM\\SYSTEM and HKLM\\SECURITY to a specified file.')
+    backup_parser.add_argument('-o', dest='outputPath', action='store', metavar='\\\\192.168.0.2\\share', required=True,
                              help='Output UNC path the target system must export the registry saves to')
 
     # A load command
@@ -638,13 +675,8 @@ if __name__ == '__main__':
         sys.exit(1)
 
     options = parser.parse_args()
-
-    if options.debug is True:
-        logging.getLogger().setLevel(logging.DEBUG)
-        # Print the Library's installation path
-        logging.debug(version.getInstallationPath())
-    else:
-        logging.getLogger().setLevel(logging.INFO)
+    # Init the example's logger theme
+    logger.init(options.ts, options.debug)
 
     domain, username, password, remoteName = parse_target(options.target)
 

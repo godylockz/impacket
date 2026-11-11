@@ -1,7 +1,9 @@
 #!/usr/bin/env python
 # Impacket - Collection of Python classes for working with network protocols.
 #
-# Copyright (C) 2023 Fortra. All rights reserved.
+# Copyright Fortra, LLC and its affiliated companies 
+#
+# All rights reserved.
 #
 # This software is provided under a slightly modified version
 # of the Apache Software License. See the accompanying LICENSE file
@@ -13,6 +15,10 @@ from impacket.dns import DNS
 
 
 class DNSTests(unittest.TestCase):
+    def test_parse_compressed_message_rejects_cyclic_pointers(self):
+        with self.assertRaisesRegex(Exception, "infinite loop"):
+            DNS().parseCompressedMessage(b"\xc0\x0e\xc0\x0c")
+
     def test_str(self):
         def chk(b, t):
             self.assertEqual(str(DNS(b)), t)

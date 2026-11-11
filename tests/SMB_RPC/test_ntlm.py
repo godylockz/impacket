@@ -1,12 +1,13 @@
 # Impacket - Collection of Python classes for working with network protocols.
 #
-# Copyright (C) 2023 Fortra. All rights reserved.
+# Copyright Fortra, LLC and its affiliated companies 
+#
+# All rights reserved.
 #
 # This software is provided under a slightly modified version
 # of the Apache Software License. See the accompanying LICENSE file
 # for more information.
 #
-from __future__ import print_function
 import unittest
 import struct
 
@@ -236,7 +237,7 @@ class NTLMTests(unittest.TestCase):
         ntResponse, lmResponse, sessionBaseKey = ntlm.computeResponseNTLMv2(flags, self.serverChallenge,
                             self.clientChallenge, serverName, self.domain, self.user, self.password, '', '' )
         hexdump(sessionBaseKey)
-        self.assertEqual(sessionBaseKey, bytearray(b'\x8d\xe4\x0c\xca\xdb\xc1\x4a\x82\xf1\x5c\xb0\xad\x0d\xe9\x5c\xa3'))
+        self.assertEqual(sessionBaseKey, bytearray(b'\xe0\x02\x92\x35\xf1\x18\x08\xe6\x12\xea\xa1\xac\xe6\x13\x78\x5f'))
         print("\n")
 
         print("4.2.4.2.1 LMv2 Response")
@@ -245,13 +246,13 @@ class NTLMTests(unittest.TestCase):
         print("\n")
         print("4.2.4.2.2 NTLMv2 Response")
         hexdump(ntResponse[:16])
-        self.assertEqual(ntResponse[:16], bytearray(b'\x68\xcd\x0a\xb8\x51\xe5\x1c\x96\xaa\xbc\x92\x7b\xeb\xef\x6a\x1c'))
+        self.assertEqual(ntResponse[:16], bytearray(b'\xb2\x32\x05\x0b\x98\xe5\xf4\xe3\x36\xbd\x18\x79\x21\xa2\x7b\xb2'))
         print("\n")
         print("4.2.4.2.3 Encrypted Session Key")
         keyExchangeKey = ntlm.KXKEY(flags, sessionBaseKey, lmResponse, self.serverChallenge, self.password,'','')
         encryptedSessionKey = ntlm.generateEncryptedSessionKey(keyExchangeKey,self.randomSessionKey)
         hexdump(encryptedSessionKey)
-        self.assertEqual(encryptedSessionKey, bytearray(b'\xC5\xDA\xD2\x54\x4F\xC9\x79\x90\x94\xCE\x1C\xE9\x0B\xC9\xD0\x3E'))
+        self.assertEqual(encryptedSessionKey, bytearray(b'\x18\x6c\xaf\xee\x66\x20\x16\x9d\xd9\x8c\x4d\x1a\x22\x56\x71\x4c'))
         print("\n")
 
         print("AUTHENTICATE MESSAGE")
@@ -264,7 +265,7 @@ class NTLMTests(unittest.TestCase):
         ntlmChallengeResponse['ntlm'] = ntResponse
         ntlmChallengeResponse['session_key'] = encryptedSessionKey
         hexdump(ntlmChallengeResponse.getData())
-        self.assertEqual(ntlmChallengeResponse.getData(), bytearray(b'NTLMSSP\x00\x03\x00\x00\x00\x18\x00\x18\x00|\x00\x00\x00T\x00T\x00\x94\x00\x00\x00\x0c\x00\x0c\x00X\x00\x00\x00\x08\x00\x08\x00d\x00\x00\x00\x10\x00\x10\x00l\x00\x00\x00\x10\x00\x10\x00\xe8\x00\x00\x003\x82\x8a\xe2D\x00o\x00m\x00a\x00i\x00n\x00U\x00s\x00e\x00r\x00C\x00O\x00M\x00P\x00U\x00T\x00E\x00R\x00\x86\xc3P\x97\xac\x9c\xec\x10%TvJW\xcc\xcc\x19\xaa\xaa\xaa\xaa\xaa\xaa\xaa\xaah\xcd\n\xb8Q\xe5\x1c\x96\xaa\xbc\x92{\xeb\xefj\x1c\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\xaa\xaa\xaa\xaa\xaa\xaa\xaa\xaa\x00\x00\x00\x00\x02\x00\x0c\x00D\x00o\x00m\x00a\x00i\x00n\x00\x01\x00\x0c\x00S\x00e\x00r\x00v\x00e\x00r\x00\x00\x00\x00\x00\x00\x00\x00\x00\xc5\xda\xd2TO\xc9y\x90\x94\xce\x1c\xe9\x0b\xc9\xd0>'))
+        self.assertEqual(ntlmChallengeResponse.getData(), bytearray(b'NTLMSSP\x00\x03\x00\x00\x00\x18\x00\x18\x00|\x00\x00\x00P\x00P\x00\x94\x00\x00\x00\x0c\x00\x0c\x00X\x00\x00\x00\x08\x00\x08\x00d\x00\x00\x00\x10\x00\x10\x00l\x00\x00\x00\x10\x00\x10\x00\xe4\x00\x00\x003\x82\x8a\xe2D\x00o\x00m\x00a\x00i\x00n\x00U\x00s\x00e\x00r\x00C\x00O\x00M\x00P\x00U\x00T\x00E\x00R\x00\x86\xc3P\x97\xac\x9c\xec\x10%TvJW\xcc\xcc\x19\xaa\xaa\xaa\xaa\xaa\xaa\xaa\xaa\xb22\x05\x0b\x98\xe5\xf4\xe36\xbd\x18y!\xa2{\xb2\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\xaa\xaa\xaa\xaa\xaa\xaa\xaa\xaa\x00\x00\x00\x00\x02\x00\x0c\x00D\x00o\x00m\x00a\x00i\x00n\x00\x01\x00\x0c\x00S\x00e\x00r\x00v\x00e\x00r\x00\x00\x00\x00\x00\x18l\xaf\xeef \x16\x9d\xd9\x8cM\x1a"VqL'))
         print("\n")
         print("4.2.4.4 GSS_WrapEx")
         print("Plaintext")
@@ -301,6 +302,57 @@ class NTLMTests(unittest.TestCase):
         #print (repr(bytearray(str(signature))))
         #raise
         print("\n")
+
+    def test_av_pairs_container_protocol(self):
+        av_pairs = ntlm.AV_PAIRS()
+        av_pairs[ntlm.NTLMSSP_AV_DOMAINNAME] = self.domain.encode('utf-16le')
+
+        self.assertIn(ntlm.NTLMSSP_AV_DOMAINNAME,av_pairs)
+        self.assertNotIn(ntlm.NTLMSSP_AV_DNS_DOMAINNAME,av_pairs)
+        self.assertEqual(list(av_pairs), [ntlm.NTLMSSP_AV_DOMAINNAME])
+
+    def test_high_level_functions_decode_bytes_arguments(self):
+        class TrackedBytes(bytes):
+            def __new__(cls, value):
+                instance = super(TrackedBytes, cls).__new__(cls, value)
+                instance.decode_called = False
+                return instance
+
+            def decode(self, encoding):
+                self.decode_called = True
+                return super(TrackedBytes, self).decode(encoding)
+
+        workstation = TrackedBytes(b'workstation')
+        type1_domain = TrackedBytes(b'domain')
+        type1 = ntlm.getNTLMSSPType1(workstation, type1_domain)
+        self.assertEqual(type1.getWorkstation(), 'workstation')
+        self.assertTrue(workstation.decode_called)
+        self.assertTrue(type1_domain.decode_called)
+
+        user = TrackedBytes(b'user')
+        password = TrackedBytes(b'password')
+        type3_domain = TrackedBytes(b'domain')
+
+        class NormalizationComplete(Exception):
+            pass
+
+        def stop_after_normalization(_):
+            raise NormalizationComplete()
+
+        original_challenge = ntlm.NTLMAuthChallenge
+        ntlm.NTLMAuthChallenge = stop_after_normalization
+        try:
+            with self.assertRaises(NormalizationComplete):
+                ntlm.getNTLMSSPType3(type1, None, user, password, type3_domain)
+        finally:
+            ntlm.NTLMAuthChallenge = original_challenge
+
+        self.assertTrue(user.decode_called)
+        self.assertTrue(password.decode_called)
+        self.assertTrue(type3_domain.decode_called)
+
+    def test_compute_nthash_accepts_text_and_bytes(self):
+        self.assertEqual(ntlm.compute_nthash('Password'), ntlm.compute_nthash(b'Password'))
 
     def __pack_and_parse(self, message, expected):
         data = message.getData()

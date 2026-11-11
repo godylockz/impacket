@@ -1,6 +1,8 @@
 # Impacket - Collection of Python classes for working with network protocols.
 #
-# Copyright (C) 2023 Fortra. All rights reserved.
+# Copyright Fortra, LLC and its affiliated companies 
+#
+# All rights reserved.
 #
 # This software is provided under a slightly modified version
 # of the Apache Software License. See the accompanying LICENSE file
@@ -14,6 +16,8 @@
 #   IWbemServices::OpenNamespace
 #   IWbemServices::ExecQuery
 #   IWbemServices::GetObject
+#   IWbemServices::PutClass
+#   IWbemServices::DeleteClass
 #
 #   Since DCOM is more high level, I'll always use the helper classes
 #
@@ -21,9 +25,7 @@
 #   IWbemServices::CancelAsyncCall
 #   IWbemServices::QueryObjectSink
 #   IWbemServices::GetObjectAsync
-#   IWbemServices::PutClass
 #   IWbemServices::PutClassAsync
-#   IWbemServices::DeleteClass
 #   IWbemServices::DeleteClassAsync
 #   IWbemServices::CreateClassEnum
 #   IWbemServices::CreateClassEnumAsync
@@ -41,13 +43,12 @@
 # 
 # Shouldn't dump errors against a win7
 #
-from __future__ import division
-from __future__ import print_function
 
 import zlib
 import base64
 import pytest
 import unittest
+import uuid
 from tests import RemoteTestCase
 
 from impacket.dcerpc.v5.dcom import wmi
@@ -61,6 +62,16 @@ class WMITests(RemoteTestCase, unittest.TestCase):
     def setUp(self):
         super(WMITests, self).setUp()
         self.set_transport_config()
+
+    def _connect_wmi(self, namespace='root\\cimv2'):
+        namespace = '\\\\%s\\%s' % (self.machine, namespace)
+        dcom = DCOMConnection(self.machine, self.username, self.password, self.domain, self.lmhash, self.nthash)
+        iInterface = dcom.CoCreateInstanceEx(wmi.CLSID_WbemLevel1Login, wmi.IID_IWbemLevel1Login)
+        iWbemLevel1Login = wmi.IWbemLevel1Login(iInterface)
+        iWbemServices = iWbemLevel1Login.NTLMLogin(namespace, NULL, NULL)
+        iWbemLevel1Login.RemRelease()
+        return dcom, iWbemServices
+
 
     @pytest.mark.xfail
     def test_activation(self):
@@ -201,6 +212,130 @@ class WMITests(RemoteTestCase, unittest.TestCase):
         #classObject,_ = iWbemServices.GetObject('Win32_Service')
         #obj = classObject.Create('BETOSERVICE', 'Beto Service', 'c:\\beto', 16, 0, 'Manual', 0, None, None, None, None, None)
         #print obj.getProperties()
+
+        dcom.disconnect()
+
+    def test_IWbemServices_ExecMethod_kwargs_partial_params(self):
+        # Kwargs-only call: unspecified InParams are sent as null through the NdTable
+        # (same semantics as `wmic path <class> call <method> <param>=<value>`),
+        # instead of requiring the full positional signature
+        dcom, iWbemServices = self._connect_wmi()
+        try:
+            classObject, _ = iWbemServices.GetObject('Win32_Process')
+            resp = classObject.Create(CommandLine='cmd.exe /c exit 0')
+            props = resp.getProperties()
+            self.assertEqual(props['ReturnValue']['value'], 0)
+            self.assertGreater(props['ProcessId']['value'], 0)
+        finally:
+            dcom.disconnect()
+
+    def test_IWbemServices_ExecMethod_kwargs_order_independent(self):
+        # Kwargs are bound by name, so the order in the call does not matter
+        dcom, iWbemServices = self._connect_wmi()
+        try:
+            classObject, _ = iWbemServices.GetObject('Win32_Process')
+            resp = classObject.Create(CurrentDirectory='c:\\', CommandLine='cmd.exe /c exit 0')
+            props = resp.getProperties()
+            self.assertEqual(props['ReturnValue']['value'], 0)
+            self.assertGreater(props['ProcessId']['value'], 0)
+        finally:
+            dcom.disconnect()
+
+    def test_IWbemServices_ExecMethod_kwargs_string_array(self):
+        # String-array InParams are marshalled as heap-referenced encoded strings;
+        # round-trip a REG_MULTI_SZ value through StdRegProv using kwargs calls only
+        dcom, iWbemServices = self._connect_wmi('root\\default')
+        try:
+            stdRegProv, _ = iWbemServices.GetObject('StdRegProv')
+            hklm = 2147483650
+            subKey = 'SOFTWARE\\impacket_kwarg_test_%s' % uuid.uuid4().hex
+            values = ['impacket', 'kwargs', 'multi', 'string']
+            stdRegProv.CreateKey(hDefKey=hklm, sSubKeyName=subKey)
+            try:
+                resp = stdRegProv.SetMultiStringValue(hDefKey=hklm, sSubKeyName=subKey,
+                                                      sValueName='MultiString', sValue=values)
+                self.assertEqual(resp.ReturnValue, 0)
+
+                fetched = stdRegProv.GetMultiStringValue(hDefKey=hklm, sSubKeyName=subKey,
+                                                         sValueName='MultiString')
+                self.assertEqual(fetched.ReturnValue, 0)
+                self.assertEqual(fetched.sValue, values)
+            finally:
+                stdRegProv.DeleteKey(hDefKey=hklm, sSubKeyName=subKey)
+        finally:
+            dcom.disconnect()
+
+    def test_IWbemServices_PutClass(self):
+        dcom, iWbemServices = self._connect_wmi() 
+
+        className = "DummyClass"
+        attrName = "Country"
+        attrValue = "USA"
+        try:
+            dummyClass, _ = iWbemServices.GetObject('')
+            dummyClass.setClassName(className)
+            dummyClass.addNewAttribute(attrName, wmi.CIM_TYPE_ENUM.CIM_TYPE_STRING, attrValue)
+
+            _ = iWbemServices.PutClass(dummyClass.marshalMe(), wmi.WBEM_FLAG_CREATE_ONLY)
+            createdClass,_ = iWbemServices.GetObject(className)
+            props = createdClass.getProperties()
+            self.assertIn(attrName,props)
+            self.assertEqual(props[attrName]['stype'],'string')
+        finally:
+            _ = iWbemServices.DeleteClass(className)
+
+            dcom.disconnect()
+
+    def test_IWbemServices_PutClass_update_adds_property(self):
+        dcom, iWbemServices = self._connect_wmi()
+        className = "DummyClass_%s" % uuid.uuid4().hex
+        try:
+            dummyClass, _ = iWbemServices.GetObject('')
+            dummyClass.setClassName(className)
+            dummyClass.addNewAttribute("Code", wmi.CIM_TYPE_ENUM.CIM_TYPE_STRING, "EN")
+            iWbemServices.PutClass(dummyClass.marshalMe(), wmi.WBEM_FLAG_CREATE_ONLY)
+
+            fetchedClass, _ = iWbemServices.GetObject(className)
+            fetchedClass.addNewAttribute("Number", wmi.CIM_TYPE_ENUM.CIM_TYPE_UINT32, 123)
+            iWbemServices.PutClass(fetchedClass.marshalMe(), wmi.WBEM_FLAG_UPDATE_ONLY)
+
+            roundTrip, _ = iWbemServices.GetObject(className)
+            props = roundTrip.getProperties()
+            self.assertIn("Code", props)
+            self.assertIn("Number", props)
+            self.assertEqual(props["Number"]["stype"], "uint32")
+        finally:
+            _ = iWbemServices.DeleteClass(className)
+            dcom.disconnect()
+
+    def test_IWbemServices_GetObject_uint8_array(self):
+        dcom, iWbemServices = self._connect_wmi()
+        try:
+            try:
+                eventFilterClass, _ = iWbemServices.GetObject('__EventFilter')
+            except Exception as exc:
+                if 'WBEM_E_NOT_FOUND' in str(exc):
+                    self.skipTest('__EventFilter is unavailable on the remote host')
+                raise
+            creatorSID = eventFilterClass.getProperties()['CreatorSID']
+            self.assertEqual(creatorSID['type'], wmi.CIM_TYPE_ENUM.CIM_ARRAY_UINT8.value)
+            self.assertEqual(creatorSID['value'], '[1, 1, 0, 0, 0, 0, 0, 5, 18, 0, 0, 0]')
+        finally:
+            dcom.disconnect()
+
+
+    def test_IWbemServices_DeleteClass_missing(self):
+        dcom, iWbemServices = self._connect_wmi()
+
+        missingClass = "MissingClass_%s" % uuid.uuid4().hex
+
+        try:
+            resp = iWbemServices.DeleteClass(missingClass)
+        except Exception as exc:
+            self.assertIn('WBEM_E_NOT_FOUND', str(exc))
+        else:
+            status = resp.GetCallStatus(0) & 0xffffffff 
+            self.assertEqual(status, wmi.WBEMSTATUS.WBEM_E_NOT_FOUND)
 
         dcom.disconnect()
 

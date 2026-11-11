@@ -1,6 +1,8 @@
 # Impacket - Collection of Python classes for working with network protocols.
 #
-# Copyright (C) 2023 Fortra. All rights reserved.
+# Copyright Fortra, LLC and its affiliated companies 
+#
+# All rights reserved.
 #
 # This software is provided under a slightly modified version
 # of the Apache Software License. See the accompanying LICENSE file
@@ -10,12 +12,20 @@ import os
 import errno
 import socket
 import select
+import struct
 
-import pytest
+try:
+    import pytest
+    remote_mark = pytest.mark.remote
+except ImportError:
+    pytest = None
+    def remote_mark(c):
+        return c
 import unittest
+from unittest.mock import Mock, patch, MagicMock
 from tests import RemoteTestCase
 
-from impacket.smbconnection import SMBConnection, smb
+from impacket.smbconnection import SMBConnection, SessionError, smb
 from impacket.smb3structs import SMB2_DIALECT_002,SMB2_DIALECT_21, SMB2_DIALECT_30
 from impacket import nt_errors, nmb
 
@@ -62,13 +72,17 @@ class SMBTests(RemoteTestCase):
         smb = self.create_connection()
         smb.kerberosLogin(self.username, '', self.domain, self.lmhash, self.nthash, '')
         credentials = smb.getCredentials()
-        self.assertEqual(credentials, (self.username, '', self.domain, self.blmhash, self.bnthash, '', None, None))
+        self.assertEqual(credentials[:6], (self.username, '', self.domain, self.blmhash, self.bnthash, ''))
+        self.assertIsNotNone(credentials[6])
+        self.assertIsNotNone(credentials[7])
         UNC = '\\\\%s\\%s' % (self.machine, self.share)
         smb.connectTree(UNC)
         smb.logoff()
         smb.reconnect()
         credentials = smb.getCredentials()
-        self.assertEqual(credentials, (self.username, '', self.domain, self.blmhash, self.bnthash, '', None, None))
+        self.assertEqual(credentials[:6], (self.username, '', self.domain, self.blmhash, self.bnthash, ''))
+        self.assertIsNotNone(credentials[6])
+        self.assertIsNotNone(credentials[7])
         UNC = '\\\\%s\\%s' % (self.machine, self.share)
         smb.connectTree(UNC)
         smb.logoff()
@@ -87,7 +101,7 @@ class SMBTests(RemoteTestCase):
         self.assertEqual(credentials, (self.username, self.password, self.domain, '', '', '', None, None))
         smb.logoff()
         del(smb)
-        
+
     def test_close_connection(self):
         smb = self.create_connection()
         smb.login(self.username, self.password, self.domain)
@@ -117,7 +131,9 @@ class SMBTests(RemoteTestCase):
         smb = self.create_connection()
         smb.kerberosLogin(self.username, '', self.domain, self.lmhash, self.nthash, '')
         credentials = smb.getCredentials()
-        self.assertEqual(credentials, (self.username, '', self.domain, self.blmhash, self.bnthash, '', None, None))
+        self.assertEqual(credentials[:6], (self.username, '', self.domain, self.blmhash, self.bnthash, ''))
+        self.assertIsNotNone(credentials[6])
+        self.assertIsNotNone(credentials[7])
         UNC = '\\\\%s\\%s' % (self.machine, self.share)
         smb.connectTree(UNC)
         smb.logoff()
@@ -126,7 +142,9 @@ class SMBTests(RemoteTestCase):
         smb = self.create_connection()
         smb.kerberosLogin(self.username, self.password, self.domain, '', '', '')
         credentials = smb.getCredentials()
-        self.assertEqual(credentials, (self.username, self.password, self.domain, '', '', '', None, None))
+        self.assertEqual(credentials[:6], (self.username, self.password, self.domain, '', '', ''))
+        self.assertIsNotNone(credentials[6])
+        self.assertIsNotNone(credentials[7])
         UNC = '\\\\%s\\%s' % (self.machine, self.share)
         smb.connectTree(UNC)
         smb.logoff()
@@ -135,7 +153,9 @@ class SMBTests(RemoteTestCase):
         smb = self.create_connection()
         smb.kerberosLogin(self.username, '', self.domain, '', '', self.aes_key_128)
         credentials = smb.getCredentials()
-        self.assertEqual(credentials, (self.username, '', self.domain, '', '', self.aes_key_128, None, None))
+        self.assertEqual(credentials[:6], (self.username, '', self.domain, '', '', self.aes_key_128))
+        self.assertIsNotNone(credentials[6])
+        self.assertIsNotNone(credentials[7])
         UNC = '\\\\%s\\%s' % (self.machine, self.share)
         smb.connectTree(UNC)
         smb.logoff()
@@ -156,7 +176,7 @@ class SMBTests(RemoteTestCase):
         smb.deleteFile(self.share, self.file + '.bak')
         smb.disconnectTree(tid)
         smb.logoff()
-        
+
     def test_readwriteFile(self):
         smb = self.create_connection()
         smb.login(self.username, self.password, self.domain)
@@ -176,9 +196,8 @@ class SMBTests(RemoteTestCase):
         smb.closeFile(tid, fid)
         smb.deleteFile(self.share, self.file)
         smb.disconnectTree(tid)
-        
         smb.logoff()
-         
+
     def test_createdeleteDirectory(self):
         smb = self.create_connection()
         smb.login(self.username, self.password, self.domain)
@@ -194,7 +213,7 @@ class SMBTests(RemoteTestCase):
                 smb.deleteDirectory(self.share, nested_dir)
                 smb.deleteDirectory(self.share, self.directory)
         smb.logoff()
- 
+
     def test_getData(self):
         smb = self.create_connection()
         smb.login(self.username, self.password, self.domain)
@@ -205,6 +224,8 @@ class SMBTests(RemoteTestCase):
         smb.getServerOS()
         smb.doesSupportNTLMv2()
         smb.isLoginRequired()
+        smb.isSigningRequired()
+        smb.getIOCapabilities()
         smb.logoff()
 
     def test_getServerName(self):
@@ -261,12 +282,65 @@ class SMBTests(RemoteTestCase):
         smb.listShares()
         smb.logoff()
 
+    def test_listSharesWithPrivs(self):
+        smb = self.create_connection()
+        smb.login(self.username, self.password, self.domain)
+        try:
+            shares = smb.listSharesWithPrivs()
+            matching_shares = [share for share in shares
+                               if share['shi502_netname'].rstrip('\x00').upper() == self.share.upper()]
+            self.assertEqual(len(matching_shares), 1)
+            share = matching_shares[0]
+            self.assertTrue(share['shi502_path'].rstrip('\x00'))
+            for share in shares:
+                descriptor = share['shi502_security_descriptor']
+                if share['shi502_reserved']:
+                    self.assertEqual(len(descriptor), share['shi502_reserved'])
+                else:
+                    self.assertFalse(descriptor)
+        finally:
+            smb.logoff()
+
     def test_getSessionKey(self):
         smb = self.create_connection()
         smb.login(self.username, self.password, self.domain)
         smb.getSessionKey()
         smb.logoff()
-        
+
+    def test_queryInfo(self):
+        smb = self.create_connection()
+        smb.login(self.username, self.password, self.domain)
+        tid = smb.connectTree(self.share)
+        fid = smb.createFile(tid, self.file)
+        file_info = smb.queryInfo(tid, fid)
+        self.assertEqual(file_info["AllocationSize"], 0)
+        self.assertEqual(file_info["EndOfFile"], 0)
+        self.assertEqual(file_info["Directory"], 0)
+        smb.closeFile(tid,fid)
+        smb.deleteFile(self.share, self.file)
+        smb.disconnectTree(tid)
+        smb.logoff()
+    
+    # ToDo: add to tests when merged to master.
+    # def test_setInfo(self):
+    #     import datetime
+    #     smb = self.create_connection()
+    #     smb.login(self.username, self.password, self.domain)
+    #     tid = smb.connectTree(self.share)
+    #     fid = smb.createFile(tid, self.file)
+    #     info_data = smb.SMBSetFileBasicInfo()
+    #     info_data['CreationTime'] = smb.POSIXtoFT(datetime.datetime(2003, 7, 7, 12, 34, 56, 789).timestamp())
+    #     info_data['LastAccessTime'] = smb.POSIXtoFT(datetime.datetime(2003, 7, 7, 12, 34, 56, 789).timestamp())
+    #     info_data['LastWriteTime'] = smb.POSIXtoFT(datetime.datetime(2003, 7, 7, 12, 34, 56, 789).timestamp())
+    #     info_data['ChangeTime'] = smb.POSIXtoFT(datetime.datetime(2003, 7, 7, 12, 34, 56, 789).timestamp())
+    #     info_data['ExtFileAttributes'] = 0
+    #     info_data['Reserved'] = 0
+    #     smb.setInfo(tid, fid, smb.SMB_SET_FILE_BASIC_INFO, info_data)
+    #     smb.closeFile(tid,fid)
+    #     smb.deleteFile(self.share, self.file)
+    #     smb.disconnectTree(tid)
+    #     smb.logoff()
+
     def __is_socket_opened(self, s):
         # We assume that if socket is selectable, it's open; and if it were not, it's closed.
         # Note: this method is accurate as long as the file descriptor used for the socket is not re-used
@@ -281,7 +355,7 @@ class SMBTests(RemoteTestCase):
         return is_socket_opened
 
 
-@pytest.mark.remote
+@remote_mark
 class SMB1Tests(SMBTests, unittest.TestCase):
 
     def setUp(self):
@@ -296,7 +370,7 @@ class SMB1Tests(SMBTests, unittest.TestCase):
         self.sessPort = nmb.SMB_SESSION_PORT
 
 
-@pytest.mark.remote
+@remote_mark
 class SMB1TestsNetBIOS(SMB1Tests):
 
     def setUp(self):
@@ -304,7 +378,7 @@ class SMB1TestsNetBIOS(SMB1Tests):
         self.sessPort = nmb.NETBIOS_SESSION_PORT
 
 
-@pytest.mark.remote
+@remote_mark
 class SMB1TestsUnicode(SMB1Tests):
 
     def setUp(self):
@@ -312,7 +386,7 @@ class SMB1TestsUnicode(SMB1Tests):
         self.flags2 = smb.SMB.FLAGS2_UNICODE | smb.SMB.FLAGS2_NT_STATUS | smb.SMB.FLAGS2_EXTENDED_SECURITY | smb.SMB.FLAGS2_LONG_NAMES
 
 
-@pytest.mark.remote
+@remote_mark
 class SMB002Tests(SMB1Tests):
 
     def setUp(self):
@@ -320,7 +394,7 @@ class SMB002Tests(SMB1Tests):
         self.dialects = SMB2_DIALECT_002
 
 
-@pytest.mark.remote
+@remote_mark
 class SMB21Tests(SMB1Tests):
 
     def setUp(self):
@@ -328,12 +402,117 @@ class SMB21Tests(SMB1Tests):
         self.dialects = SMB2_DIALECT_21
 
 
-@pytest.mark.remote
+@remote_mark
 class SMB3Tests(SMB1Tests):
 
     def setUp(self):
         super(SMB3Tests, self).setUp()
         self.dialects = SMB2_DIALECT_30
+
+
+class Test_Issue2099_SessionError_On_Truncated_Response(unittest.TestCase):
+    """Regression for #2099: when session setup response is truncated/malformed, login must raise SessionError, not ValueError.
+
+    Local test (mocks transport; no remote target). Runs with pytest -m 'not remote'.
+    """
+
+    def test_login_raises_session_error_when_session_response_parsing_fails(self):
+        # When sessionData.fromString(sessionResponse['Data']) raises parse errors (e.g. ValueError/struct.error),
+        # login_extended should catch it and raise SessionError so users see auth failure, not raw parse errors.
+        from impacket.smb import (
+            NewSMBPacket,
+            SMBCommand,
+            SMBSessionSetupAndX_Extended_Response_Parameters,
+            SMBNTLMDialect_Parameters,
+            SMBSessionSetupAndX_Extended_Response_Data,
+        )
+
+        # Build minimal negotiate response so neg_session succeeds
+        neg_params = SMBNTLMDialect_Parameters()
+        neg_params['DialectIndex'] = 0
+        neg_params['SecurityMode'] = 0
+        neg_params['MaxMpxCount'] = 2
+        neg_params['MaxNumberVcs'] = 1
+        neg_params['MaxBufferSize'] = 61440
+        neg_params['MaxRawSize'] = 65536
+        neg_params['SessionKey'] = 0
+        neg_params['Capabilities'] = smb.SMB.CAP_EXTENDED_SECURITY
+        neg_params['LowDateTime'] = 0
+        neg_params['HighDateTime'] = 0
+        neg_params['ServerTimeZone'] = 0
+        neg_params['ChallengeLength'] = 0
+        neg_cmd = SMBCommand(smb.SMB.SMB_COM_NEGOTIATE)
+        neg_cmd['Parameters'] = neg_params.getData()
+        neg_cmd['Data'] = b'\x00' * 16  # ServerGUID + empty SecurityBlob for extended
+        neg_pkt = NewSMBPacket()
+        neg_pkt['Command'] = smb.SMB.SMB_COM_NEGOTIATE
+        neg_pkt['ErrorClass'] = 0
+        neg_pkt['ErrorCode'] = 0
+        neg_pkt['Data'] = [neg_cmd.getData()]
+        neg_bytes = neg_pkt.getData()
+
+        # Build minimal session setup response (Data will be passed to fromString; we patch fromString to raise)
+        resp_params = SMBSessionSetupAndX_Extended_Response_Parameters()
+        resp_params['Action'] = 0
+        resp_params['SecurityBlobLength'] = 0
+        resp_cmd = SMBCommand(smb.SMB.SMB_COM_SESSION_SETUP_ANDX)
+        resp_cmd['Parameters'] = resp_params.getData()
+        resp_cmd['Data'] = b'TruncatedNoNUL'  # truncated so fromString would raise; we'll patch anyway
+        resp_pkt = NewSMBPacket()
+        resp_pkt['Command'] = smb.SMB.SMB_COM_SESSION_SETUP_ANDX
+        resp_pkt['ErrorClass'] = 0
+        resp_pkt['ErrorCode'] = 0
+        resp_pkt['Uid'] = 1
+        resp_pkt['Data'] = [resp_cmd.getData()]
+        session_setup_bytes = resp_pkt.getData()
+
+        class RecvResponse(object):
+            def __init__(self, data):
+                self._data = data
+            def get_trailer(self):
+                return self._data
+
+        mock_sess = Mock()
+        mock_sess.recv_packet = Mock(side_effect=[
+            RecvResponse(neg_bytes),
+            RecvResponse(session_setup_bytes),
+        ])
+        mock_sess.send_packet = Mock()
+
+        parse_exceptions = [
+            ValueError("Can't find NUL terminator in field 'NativeOS'"),
+            struct.error("unpack requires a buffer of 2 bytes"),
+        ]
+        for parse_exc in parse_exceptions:
+            with self.subTest(parse_exception=type(parse_exc).__name__):
+                mock_sess.recv_packet = Mock(side_effect=[
+                    RecvResponse(neg_bytes),
+                    RecvResponse(session_setup_bytes),
+                ])
+
+                with patch('impacket.nmb.NetBIOSTCPSession', return_value=mock_sess), \
+                     patch.object(SMBSessionSetupAndX_Extended_Response_Data, 'fromString', side_effect=parse_exc):
+                    # Session setup response parsing raises; SMB.__init__ may call login('','') which
+                    # triggers recv then fromString. Raised type is smb.SessionError (from init) or
+                    # smbconnection.SessionError (from conn.login after init).
+                    with self.assertRaises((SessionError, smb.SessionError)) as ctx:
+                        conn = SMBConnection('127.0.0.1', '127.0.0.1')
+                        conn.login('user', 'pass')
+                    self.assertIsNotNone(getattr(ctx.exception, 'error', None) or getattr(ctx.exception, 'error_code', None))
+
+
+class Test_SMBNativeMetadata(unittest.TestCase):
+    def test_native_metadata_defaults_and_configurable(self):
+        with patch.object(smb.SMB, '__init__', return_value=None) as smb_client, \
+             patch.object(smb.SMB, 'get_flags', return_value=(0, 0)):
+            SMBConnection('127.0.0.1', '127.0.0.1', preferredDialect=smb.SMB_DIALECT)
+            self.assertEqual(smb_client.call_args.kwargs['nativeOS'], 'Windows 10.0')
+            self.assertEqual(smb_client.call_args.kwargs['nativeLanMan'], 'Windows 10.0')
+
+            SMBConnection('127.0.0.1', '127.0.0.1', preferredDialect=smb.SMB_DIALECT,
+                          nativeOS='Windows', nativeLanMan='NT LAN Manager')
+            self.assertEqual(smb_client.call_args.kwargs['nativeOS'], 'Windows')
+            self.assertEqual(smb_client.call_args.kwargs['nativeLanMan'], 'NT LAN Manager')
 
 
 if __name__ == "__main__":

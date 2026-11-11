@@ -1,6 +1,8 @@
 # Impacket - Collection of Python classes for working with network protocols.
 #
-# Copyright (C) 2023 Fortra. All rights reserved.
+# Copyright Fortra, LLC and its affiliated companies 
+#
+# All rights reserved.
 #
 # This software is provided under a slightly modified version
 # of the Apache Software License. See the accompanying LICENSE file
@@ -22,16 +24,15 @@
 #   -  https://www.passcape.com/windows_password_recovery_dpapi_master_key
 #
 
-from __future__ import division
-from __future__ import print_function
 import sys
 
 from struct import unpack
-from datetime import datetime
+from datetime import datetime, timezone
 from binascii import unhexlify, hexlify
 from struct import pack
 from hashlib import pbkdf2_hmac
 from Cryptodome.Hash import HMAC, SHA512, SHA1, MD4
+from hmac import digest as hmac_digest
 from Cryptodome.Cipher import AES, DES3
 from Cryptodome.Util.Padding import unpad
 from Cryptodome.PublicKey import RSA
@@ -303,7 +304,7 @@ class MasterKey(Structure):
         else:
             hashModule = ALGORITHMS_DATA[self['HashAlgo']][1]
 
-        prf = lambda p, s: HMAC.new(p, s, hashModule).digest()
+        prf = lambda p, s: hmac_digest(p, s, {SHA1: 'sha1', SHA512: 'sha512'}[hashModule])
         derivedBlob = self.deriveKey(key, self['Salt'],
                                     ALGORITHMS_DATA[self['CryptAlgo']][0] + ALGORITHMS_DATA[self['CryptAlgo']][3],
                                     count=self['MasterKeyIterationCount'], hashFunction=prf)
@@ -386,7 +387,7 @@ class CREDHIST_ENTRY(Structure):
         else:
             hashModule = ALGORITHMS_DATA[self['HashAlgo']][1]
 
-        prf = lambda p, s: HMAC.new(p, s, hashModule).digest()
+        prf = lambda p, s: hmac_digest(p, s, {SHA1: 'sha1', SHA512: 'sha512'}[hashModule])
 
         derivedBlob = self.deriveKey(key, self['Salt'], ALGORITHMS_DATA[self['CryptAlgo']][0] + ALGORITHMS_DATA[self['CryptAlgo']][3], count=self['Rounds'], hashFunction=prf)
 
@@ -632,7 +633,12 @@ class DPAPI_BLOB(Structure):
         return derivedKey
 
     def decrypt(self, key, entropy = None):
-        keyHash = SHA1.new(key).digest()
+        if len(key) == 20:
+            # Key has already been hashed
+            keyHash = key
+        else:
+            keyHash = SHA1.new(key).digest()
+        
         sessionKey = HMAC.new(keyHash, self['Salt'], ALGORITHMS_DATA[self['HashAlgo']][1])
         if entropy is not None:
             sessionKey.update(entropy)
@@ -649,7 +655,7 @@ class DPAPI_BLOB(Structure):
         # Now check the signature
 
         # ToDo Fix this, it's just ugly, more testing so we can remove one
-        toSign = (self.rawData[20:][:len(self.rawData)-20-len(self['Sign'])-4])
+        toSign = (self.rawData[20:len(self)-len(self['Sign'])-4])
 
         # Calculate the different HMACKeys
         keyHash2 = keyHash + b"\x00"*ALGORITHMS_DATA[self['HashAlgo']][1].block_size
@@ -777,7 +783,7 @@ class VAULT_VCRD(Structure):
     def dump(self):
         print("[VCRD]")
         print("SchemaGuid  : %s" % bin_to_string(self['SchemaGuid']))
-        print("LastWritten : %s" % (datetime.utcfromtimestamp(getUnixTime(self['LastWritten']))))
+        print("LastWritten : %s" % (datetime.fromtimestamp(getUnixTime(self['LastWritten']), tz=timezone.utc)))
         print("FriendlyName: %s" % (self['FriendlyName'].decode('utf-16le')))
         print()
         for i,entry in enumerate(self.mapEntries):
@@ -1075,7 +1081,7 @@ class CREDENTIAL_BLOB(Structure):
 
     def dump(self):
         print("[CREDENTIAL]")
-        print("LastWritten : %s" % (datetime.utcfromtimestamp(getUnixTime(self['LastWritten']))))
+        print("LastWritten : %s" % (datetime.fromtimestamp(getUnixTime(self['LastWritten']), tz=timezone.utc)))
         print("Flags       : 0x%.8x (%s)" % (self['Flags'], getFlags(CREDENTIAL_FLAGS, self['Flags'])))
         print("Persist     : 0x%.8x (%s)" % (self['Persist'], CREDENTIAL_PERSIST(self['Persist']).name))
         print("Type        : 0x%.8x (%s)" % (self['Type'], CREDENTIAL_TYPE(self['Type']).name))

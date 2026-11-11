@@ -1,6 +1,8 @@
 # Impacket - Collection of Python classes for working with network protocols.
 #
-# Copyright (C) 2023 Fortra. All rights reserved.
+# Copyright Fortra, LLC and its affiliated companies 
+#
+# All rights reserved.
 #
 # This software is provided under a slightly modified version
 # of the Apache Software License. See the accompanying LICENSE file
@@ -16,12 +18,11 @@
 #   [X] Unions and rest of the structured types
 #   [ ] Documentation for this library, especially the support for Arrays
 #
-from __future__ import division
-from __future__ import print_function
 import random
 import inspect
 from struct import pack, unpack_from, calcsize
 from six import with_metaclass, PY3
+from binascii import hexlify
 
 from impacket import LOG
 from impacket.dcerpc.v5.enum import Enum
@@ -141,7 +142,7 @@ class NDR(object):
         return self.fields[key]
 
     def __str__(self):
-        return self.getData()
+        return str(hexlify(self.getData()).decode("ascii"))
 
     def __len__(self):
         # XXX: improve

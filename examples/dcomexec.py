@@ -1,7 +1,9 @@
 #!/usr/bin/env python
 # Impacket - Collection of Python classes for working with network protocols.
 #
-# Copyright (C) 2023 Fortra. All rights reserved.
+# Copyright Fortra, LLC and its affiliated companies 
+#
+# All rights reserved.
 #
 # This software is provided under a slightly modified version
 # of the Apache Software License. See the accompanying LICENSE file
@@ -34,8 +36,6 @@
 #       getInterface() method
 #
 
-from __future__ import division
-from __future__ import print_function
 import argparse
 import cmd
 import logging
@@ -593,9 +593,8 @@ if __name__ == '__main__':
         sys.exit(1)
 
     options = parser.parse_args()
-
     # Init the example's logger theme
-    logger.init(options.ts)
+    logger.init(options.ts, options.debug)
 
     if options.codec is not None:
         CODEC = options.codec
@@ -603,19 +602,19 @@ if __name__ == '__main__':
         if CODEC is None:
             CODEC = 'utf-8'
 
+    if options.k or options.aesKey is not None or options.keytab is not None:
+        logging.error("Kerberos authentication is not supported by dcomexec.py's current DCOM objects "
+                      "(ShellWindows, ShellBrowserWindow, MMC20). These objects are hosted in the user context "
+                      "and do not accept HOST/<target> Kerberos tickets. Use wmiexec.py -k for Kerberos command "
+                      "execution, or use dcomexec.py with NTLM password/hash authentication.")
+        sys.exit(1)
+
     if ' '.join(options.command) == ' ' and options.nooutput is True:
         logging.error("-nooutput switch and interactive shell not supported")
         sys.exit(1)
     if options.silentcommand and options.command == ' ':
         logging.error("-silentcommand switch and interactive shell not supported")
         sys.exit(1)
-
-    if options.debug is True:
-        logging.getLogger().setLevel(logging.DEBUG)
-        # Print the Library's installation path
-        logging.debug(version.getInstallationPath())
-    else:
-        logging.getLogger().setLevel(logging.INFO)
 
     if options.com_version is not None:
         try:

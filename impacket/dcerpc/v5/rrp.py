@@ -1,6 +1,8 @@
 # Impacket - Collection of Python classes for working with network protocols.
 #
-# Copyright (C) 2023 Fortra. All rights reserved.
+# Copyright Fortra, LLC and its affiliated companies 
+#
+# All rights reserved.
 #
 # This software is provided under a slightly modified version
 # of the Apache Software License. See the accompanying LICENSE file
@@ -690,32 +692,28 @@ def checkNullString(string):
         return string
 
 def packValue(valueType, value):
+    if valueType in (REG_EXPAND_SZ, REG_MULTI_SZ, REG_SZ) and isinstance(value, bytes):
+        import sys
+        value = value.decode(sys.getfilesystemencoding())
+
     if valueType == REG_DWORD:
         retData = pack('<L', value)
     elif valueType == REG_DWORD_BIG_ENDIAN:
         retData = pack('>L', value)
     elif valueType == REG_EXPAND_SZ:
-        try:
-            retData = value.encode('utf-16le')
-        except UnicodeDecodeError:
-            import sys
-            retData = value.decode(sys.getfilesystemencoding()).encode('utf-16le')
+        retData = checkNullString(value).encode('utf-16le')
     elif valueType == REG_MULTI_SZ:
-        try:
-            retData = value.encode('utf-16le')
-        except UnicodeDecodeError:
-            import sys
-            retData = value.decode(sys.getfilesystemencoding()).encode('utf-16le')
+        v = checkNullString(value)
+        # REG_MULTI_SZ must end with 2 null-bytes
+        if v[-2:-1] != '\x00':
+            v = v + '\x00'
+        retData = v.encode('utf-16le')
     elif valueType == REG_QWORD:
         retData = pack('<Q', value)
     elif valueType == REG_QWORD_LITTLE_ENDIAN:
         retData = pack('>Q', value)
     elif valueType == REG_SZ:
-        try:
-            retData = value.encode('utf-16le')
-        except UnicodeDecodeError:
-            import sys
-            retData = value.decode(sys.getfilesystemencoding()).encode('utf-16le')
+        retData = checkNullString(value).encode('utf-16le')
     else:
         retData = value
 
@@ -853,8 +851,17 @@ def hBaseRegGetKeySecurity(dce, hKey, securityInformation = OWNER_SECURITY_INFOR
     request['hKey'] = hKey
     request['SecurityInformation'] = securityInformation
     request['pRpcSecurityDescriptorIn']['lpSecurityDescriptor'] = NULL
-    request['pRpcSecurityDescriptorIn']['cbInSecurityDescriptor'] = 1024
+    request['pRpcSecurityDescriptorIn']['cbInSecurityDescriptor'] = 4096
 
+    return dce.request(request)
+
+def hBaseRegSetKeySecurity(dce, hKey, sd, securityInformation=OWNER_SECURITY_INFORMATION):
+    request = BaseRegSetKeySecurity()
+    request['hKey'] = hKey
+    request['SecurityInformation'] = securityInformation
+    request['pRpcSecurityDescriptor']['lpSecurityDescriptor'] = sd.getData()
+    request['pRpcSecurityDescriptor']['cbInSecurityDescriptor'] = len(sd.getData())
+    request['pRpcSecurityDescriptor']['cbOutSecurityDescriptor'] = len(sd.getData())
     return dce.request(request)
 
 def hBaseRegLoadKey(dce, hKey, lpSubKey, lpFile):

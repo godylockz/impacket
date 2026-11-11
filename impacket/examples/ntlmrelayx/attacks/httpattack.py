@@ -1,6 +1,8 @@
 # Impacket - Collection of Python classes for working with network protocols.
 #
-# Copyright (C) 2023 Fortra. All rights reserved.
+# Copyright Fortra, LLC and its affiliated companies 
+#
+# All rights reserved.
 #
 # This software is provided under a slightly modified version
 # of the Apache Software License. See the accompanying LICENSE file
@@ -17,11 +19,17 @@
 
 from impacket.examples.ntlmrelayx.attacks import ProtocolAttack
 from impacket.examples.ntlmrelayx.attacks.httpattacks.adcsattack import ADCSAttack
+from impacket.examples.ntlmrelayx.attacks.httpattacks.cesattack import CESAttack
+from impacket.examples.ntlmrelayx.attacks.httpattacks.sccmpoliciesattack import SCCMPoliciesAttack
+from impacket.examples.ntlmrelayx.attacks.httpattacks.sccmdpattack import SCCMDPAttack
+from impacket.examples.ntlmrelayx.attacks.httpattacks.sccmclientpushattack import SCCMClientPushAttack
+
+
 
 PROTOCOL_ATTACK_CLASS = "HTTPAttack"
 
 
-class HTTPAttack(ProtocolAttack, ADCSAttack):
+class HTTPAttack(ProtocolAttack, ADCSAttack, CESAttack, SCCMPoliciesAttack, SCCMDPAttack, SCCMClientPushAttack):
     """
     This is the default HTTP attack. This attack only dumps the root page, though
     you can add any complex attack below. self.client is an instance of urrlib.session
@@ -32,12 +40,21 @@ class HTTPAttack(ProtocolAttack, ADCSAttack):
 
     def run(self):
 
-        if self.config.isADCSAttack:
+        if self.config.isCESAttack:
+            CESAttack._run(self)
+        elif self.config.isADCSAttack:
             ADCSAttack._run(self)
+        elif self.config.isSCCMPoliciesAttack:
+            SCCMPoliciesAttack._run(self)
+        elif self.config.isSCCMDPAttack:
+            SCCMDPAttack._run(self)
+        elif self.config.isSCCMClientPushAttack:
+            SCCMClientPushAttack._run(self)    
         else:
             # Default action: Dump requested page to file, named username-targetname.html
             # You can also request any page on the server via self.client.session,
             # for example with:
+            print("DEFAULT CASE")
             self.client.request("GET", "/")
             r1 = self.client.getresponse()
             print(r1.status, r1.reason)

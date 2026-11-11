@@ -1,6 +1,8 @@
 # Impacket - Collection of Python classes for working with network protocols.
 #
-# Copyright (C) 2023 Fortra. All rights reserved.
+# Copyright Fortra, LLC and its affiliated companies 
+#
+# All rights reserved.
 #
 # This software is provided under a slightly modified version
 # of the Apache Software License. See the accompanying LICENSE file
@@ -20,11 +22,13 @@ from datetime import datetime
 from enum import Enum
 from six import b
 
-from struct import pack, unpack, calcsize
+from struct import unpack
 from binascii import hexlify
 
 from impacket.structure import Structure
 from impacket import LOG
+
+import os
 
 
 class Enctype(Enum):
@@ -279,19 +283,15 @@ class Keytab:
             LOG.warning("No matching key for SPN '%s' in given keytab found!", username)
 
 
-    def saveFile(self, fileName):
+    def saveFile(self, fileName, chmod=0o600):
         f = open(fileName, 'wb+')
         f.write(self.getData())
         f.close()
+        if chmod is not None:
+            os.chmod(fileName, chmod)
 
     def prettyPrint(self):
         print("Keytab Entries:")
         for i, entry in enumerate(self.entries):
             print(("[%d]" % i))
             print(entry.prettyPrint('\t'))
-
-
-if __name__ == '__main__':
-    import sys
-    keytab = Keytab.loadFile(sys.argv[1])
-    keytab.prettyPrint()

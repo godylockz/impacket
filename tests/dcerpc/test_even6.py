@@ -1,12 +1,16 @@
 # Impacket - Collection of Python classes for working with network protocols.
 #
-# Copyright (C) 2023 Fortra. All rights reserved.
+# Copyright Fortra, LLC and its affiliated companies 
+#
+# All rights reserved.
 #
 # This software is provided under a slightly modified version
 # of the Apache Software License. See the accompanying LICENSE file
 # for more information.
 #
 # Tested so far:
+#   (h)EvtRpcRegisterRemoteSubscription
+#   (h)EvtRpcRemoteSubscriptionNext
 #   (h)EvtRpcRegisterLogQuery
 #   (h)EvtRpcQueryNext
 # Not yet
@@ -15,8 +19,6 @@
 #   EvtRpcOpenLogHandle
 #   EvtRpcGetChannelList
 #
-from __future__ import division
-from __future__ import print_function
 import pytest
 import unittest
 from six.moves import xrange
@@ -34,6 +36,87 @@ class EVEN6Tests(DCERPCTests):
     string_binding = r"ncacn_np:{0.machine}[\PIPE\eventlog]"
     authn = True
     authn_level = RPC_C_AUTHN_LEVEL_PKT_PRIVACY
+
+    def test_EvtRpcRegisterRemoteSubscription_EvtRpcRemoteSubscriptionNext(self):
+        dce, rpctransport = self.connect()
+
+        request = even6.EvtRpcRegisterRemoteSubscription()
+        request['channelPath'] = 'Security\x00'
+        request['query'] = '*\x00'
+        request['bookmarkXml'] = even6.NULL
+        request['Flags'] = even6.EvtSubscribeStartAtOldestRecord | even6.EvtSubscribePull
+        request.dump()
+
+        resp = dce.request(request)
+        resp.dump()
+        subscription_handle = resp['Handle']
+
+        request = even6.EvtRpcRemoteSubscriptionNext()
+        request['Handle'] = subscription_handle
+        request['NumRequestedRecords'] = 5
+        request['TimeOut'] = 1000
+        request['Flags'] = 0
+        request.dump()
+
+        resp = dce.request(request)
+        resp.dump()
+
+        for i in xrange(resp['NumActualRecords']):
+            event_offset = resp['EventDataIndices'][i]['Data']
+            event_size = resp['EventDataSizes'][i]['Data']
+            event = resp['ResultBuffer'][event_offset:event_offset + event_size]
+
+        resp = even6.hEvtRpcClose(dce, subscription_handle)
+        resp.dump()
+
+    def test_hEvtRpcRegisterRemoteSubscription_hEvtRpcRemoteSubscriptionNext(self):
+        dce, rpctransport = self.connect()
+
+        resp = even6.hEvtRpcRegisterRemoteSubscription(
+            dce, 'Security\x00', '*\x00', even6.NULL,
+            even6.EvtSubscribeStartAtOldestRecord | even6.EvtSubscribePull
+        )
+        resp.dump()
+        subscription_handle = resp['Handle']
+
+        resp = even6.hEvtRpcRemoteSubscriptionNext(dce, subscription_handle, 5)
+        resp.dump()
+
+        for i in xrange(resp['NumActualRecords']):
+            event_offset = resp['EventDataIndices'][i]['Data']
+            event_size = resp['EventDataSizes'][i]['Data']
+            event = resp['ResultBuffer'][event_offset:event_offset + event_size]
+
+        resp = even6.hEvtRpcClose(dce, subscription_handle)
+        resp.dump()
+
+    def test_hEvtRpcClearLog(self):
+        dce, rpctransport = self.connect()
+
+        resp = even6.hEvtRpcRegisterControllableOperation(dce)
+        resp.dump()
+
+        control_handle = resp['Handle']
+
+        resp = even6.hEvtRpcClearLog(dce, control_handle, 'Security\x00')
+        resp.dump()
+
+        resp = even6.hEvtRpcClose(dce, control_handle)
+        resp.dump()
+
+    def test_hEvtRpcExportLog(self):
+        dce, rpctransport = self.connect()
+
+        resp = even6.hEvtRpcRegisterControllableOperation(dce)
+        resp.dump()
+
+        control_handle = resp['Handle']
+
+        resp = even6.hEvtRpcExportLog(dce, control_handle, 'Security\x00', '*\x00', 'C:\\Security_Log_Exported.evtx\x00')
+        resp.dump()
+
+        resp = even6.hEvtRpcClose(dce, control_handle)
+        resp.dump()
 
     def test_EvtRpcRegisterLogQuery_EvtRpcQueryNext(self):
         dce, rpctransport = self.connect()

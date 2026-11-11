@@ -1,7 +1,9 @@
 #!/usr/bin/env python
 # Impacket - Collection of Python classes for working with network protocols.
 #
-# Copyright (C) 2023 Fortra. All rights reserved.
+# Copyright Fortra, LLC and its affiliated companies 
+#
+# All rights reserved.
 #
 # This software is provided under a slightly modified version
 # of the Apache Software License. See the accompanying LICENSE file
@@ -17,8 +19,6 @@
 #   SMB DCE/RPC
 #
 
-from __future__ import division
-from __future__ import print_function
 import sys
 import logging
 import argparse
@@ -28,9 +28,14 @@ from impacket.examples.smbclient import MiniImpacketShell
 from impacket import version
 from impacket.smbconnection import SMBConnection
 
+def client_name(value):
+    if not 1 <= len(value) <= 15:
+        raise argparse.ArgumentTypeError('NetBIOS name must be between 1 and 15 characters long')
+    if not value.isascii():
+        raise argparse.ArgumentTypeError('NetBIOS name must contain only ASCII characters')
+    return value
+
 def main():
-    # Init the example's logger theme
-    logger.init()
     print(version.BANNER)
     parser = argparse.ArgumentParser(add_help = True, description = "SMB client implementation.")
 
@@ -38,6 +43,7 @@ def main():
     parser.add_argument('-inputfile', type=argparse.FileType('r'), help='input file with commands to execute in the mini shell')
     parser.add_argument('-outputfile', action='store', help='Output file to log smbclient actions in')
     parser.add_argument('-debug', action='store_true', help='Turn DEBUG output ON')
+    parser.add_argument('-ts', action='store_true', help='Adds timestamp to every logging output')
 
     group = parser.add_argument_group('authentication')
 
@@ -50,6 +56,12 @@ def main():
     group.add_argument('-aesKey', action="store", metavar = "hex key", help='AES key to use for Kerberos Authentication '
                                                                             '(128 or 256 bits)')
 
+    group = parser.add_argument_group('dfs')
+
+    group.add_argument('-dfs-follow', action='store_true', default=False,
+                       help='Automatically follow DFS links by creating new SMB connections to target servers. '
+                            'Disabled by default for OPSEC reasons (use dfs_mode command in shell to toggle at runtime)')
+
     group = parser.add_argument_group('connection')
 
     group.add_argument('-dc-ip', action='store', metavar="ip address",
@@ -60,19 +72,17 @@ def main():
                             'This is useful when target is the NetBIOS name and you cannot resolve it')
     group.add_argument('-port', choices=['139', '445'], nargs='?', default='445', metavar="destination port",
                        help='Destination port to connect to SMB Server')
+    group.add_argument('--client-name', type=client_name, metavar='NAME',
+                       help='Client name for SMB connections; used as the NetBIOS name on port 139 and as the '
+                           'NTLM workstation name when applicable (1-15 ASCII characters)')
 
     if len(sys.argv)==1:
         parser.print_help()
         sys.exit(1)
 
     options = parser.parse_args()
-
-    if options.debug is True:
-        logging.getLogger().setLevel(logging.DEBUG)
-        # Print the Library's installation path
-        logging.debug(version.getInstallationPath())
-    else:
-        logging.getLogger().setLevel(logging.INFO)
+    # Init the example's logger theme
+    logger.init(options.ts, options.debug)
 
     domain, username, password, address = parse_target(options.target)
 
@@ -96,13 +106,14 @@ def main():
         nthash = ''
 
     try:
-        smbClient = SMBConnection(address, options.target_ip, sess_port=int(options.port))
+        smbClient = SMBConnection(address, options.target_ip, sess_port=int(options.port), myName=options.client_name)
         if options.k is True:
             smbClient.kerberosLogin(username, password, domain, lmhash, nthash, options.aesKey, options.dc_ip )
         else:
             smbClient.login(username, password, domain, lmhash, nthash)
 
-        shell = MiniImpacketShell(smbClient, None, options.outputfile)
+        shell = MiniImpacketShell(smbClient, None, options.outputfile, dfs_auto_follow=options.dfs_follow,
+                                  client_name=options.client_name)
 
         if options.outputfile is not None:
             f = open(options.outputfile, 'a')

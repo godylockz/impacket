@@ -1,6 +1,8 @@
 # Impacket - Collection of Python classes for working with network protocols.
 #
-# Copyright (C) 2023 Fortra. All rights reserved.
+# Copyright Fortra, LLC and its affiliated companies 
+#
+# All rights reserved.
 #
 # This software is provided under a slightly modified version
 # of the Apache Software License. See the accompanying LICENSE file
@@ -32,9 +34,6 @@
 #
 # 3. This notice cannot be removed or altered from any source distribution.
 #
-from __future__ import division
-from __future__ import print_function
-from __future__ import absolute_import
 import errno
 import re
 import select
@@ -328,6 +327,7 @@ class NBNodeStatusResponse(NBNSResourceRecord):
         res = pack('!B', self.num_names )
         for i in range(0, self.num_names):
             res += self.entries[i].getData()
+        res += self.statistics.getData() # (RFC 1002) 4.2.18.  NODE STATUS RESPONSE
 
 class NBPositiveNameQueryResponse(NBNSResourceRecord):
     def __init__(self, data = 0):
@@ -509,12 +509,12 @@ class NetBIOS:
     # Creates a NetBIOS instance without specifying any default NetBIOS domain nameserver.
     # All queries will be sent through the servport.
     def __init__(self, servport = NETBIOS_NS_PORT):
-        self.__servport = NETBIOS_NS_PORT
+        self.__servport = servport
         self.__nameserver = None
         self.__broadcastaddr = BROADCAST_ADDR
         self.mac = b'00-00-00-00-00-00'
 
-    def _setup_connection(self, dstaddr, timeout=None):
+    def _setup_connection(self, dstaddr):
         port = rand.randint(10000, 60000)
         af, socktype, proto, _canonname, _sa = socket.getaddrinfo(dstaddr, port, socket.AF_INET, socket.SOCK_DGRAM)[0]
         s = socket.socket(af, socktype, proto)
@@ -976,6 +976,7 @@ class NetBIOSTCPSession(NetBIOSSession):
             timeout = 3600
 
         start_time = time.time()
+        last_recv_time = time.time()
         bytes_left = read_length
 
         while bytes_left > 0:
@@ -987,12 +988,13 @@ class NetBIOSTCPSession(NetBIOSSession):
             except Exception as ex:
                 raise NetBIOSError('Error occurs while reading from remote', ERRCLASS_OS, ex.errno)
 
-            if (time.time() - start_time) > timeout:
+            if (time.time() - last_recv_time) > timeout:
                 raise NetBIOSTimeout
 
             if len(received) == 0:
                 raise NetBIOSError('Error while reading from remote', ERRCLASS_OS, None)
 
+            last_recv_time = time.time()
             data = data + received
             bytes_left = read_length - len(data)
 

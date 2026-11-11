@@ -1,7 +1,9 @@
 #!/usr/bin/env python
 # Impacket - Collection of Python classes for working with network protocols.
 #
-# Copyright (C) 2023 Fortra. All rights reserved.
+# Copyright Fortra, LLC and its affiliated companies 
+#
+# All rights reserved.
 #
 # This software is provided under a slightly modified version
 # of the Apache Software License. See the accompanying LICENSE file
@@ -19,7 +21,9 @@ if PY2:
     FileNotFoundError = IOError
 else:
     from unittest import mock
-from impacket.krb5.ccache import CCache, Credential
+from impacket.krb5 import types
+from impacket.krb5.ccache import AuthData, CCache, CountedOctetString, Credential, Principal
+from impacket.krb5.constants import PrincipalNameType
 
 
 class CCACHETests(unittest.TestCase):
@@ -113,6 +117,119 @@ class CCACHETests(unittest.TestCase):
                 self.assertEqual(username, self.username)
                 self.assertIsNone(TGS)
                 self.assertIsNotNone(TGT)
+
+    @pytest.mark.skipif(PY2, reason="requires python 3.3 or higher")
+    def test_ccache_parseFile_can_require_exact_spn(self):
+        if not PY2:
+            ccache = mock.Mock()
+            tgt_credential = mock.Mock()
+            tgt = object()
+            tgt_credential.toTGT.return_value = tgt
+            ccache.getCredential.side_effect = [None, tgt_credential]
+
+            with mock.patch.object(CCache, "loadFile", return_value=ccache):
+                domain, username, TGT, TGS = CCache.parseFile(
+                    self.domain,
+                    self.username,
+                    "cifs/server.innovation.rocks",
+                    anySPN=False,
+                )
+
+            self.assertEqual(domain, self.domain)
+            self.assertEqual(username, self.username)
+            self.assertIs(TGT, tgt)
+            self.assertIsNone(TGS)
+            self.assertEqual(
+                ccache.getCredential.call_args_list,
+                [
+                    mock.call(
+                        "CIFS/SERVER.INNOVATION.ROCKS@INNOVATION.ROCKS",
+                        anySPN=False,
+                    ),
+                    mock.call(
+                        "krbtgt/INNOVATION.ROCKS@INNOVATION.ROCKS",
+                        anySPN=False,
+                    ),
+                ],
+            )
+
+    def test_credential_with_authdata_roundtrip(self):
+        # Regression test for a credential that carries authorization data.
+        # Credential.authData started as a tuple and was never turned into a
+        # list, so parsing any credential with auth-data raised
+        # AttributeError: 'tuple' object has no attribute 'append'.
+        ccache = CCache.loadFile(self.cache_v4_file)
+        cred = ccache.credentials[0]
+
+        octet = CountedOctetString()
+        octet["data"] = b"\xde\xad\xbe\xef"
+        octet["length"] = len(octet["data"])
+        ad = AuthData()
+        ad["authtype"] = 1
+        ad["authdata"] = octet
+        cred.authData = [ad]
+
+        reparsed = Credential(cred.getData())
+
+        self.assertEqual(len(reparsed.authData), 1)
+        self.assertEqual(reparsed.authData[0]["authtype"], 1)
+        self.assertEqual(reparsed.authData[0]["authdata"]["data"], b"\xde\xad\xbe\xef")
+
+    def test_ccache_getCredential_three_part_spn(self):
+        # Regression test for the 3-part SPN fix (service/host/domain@REALM),
+        # seen in multi domain forests ldap tickets
+        realm = "FOREST.LOCAL"
+        cached_spn = "LDAP/DC01.CHILD-A.LOCAL/CHILD-A.LOCAL@{}".format(realm)
+
+        ccache = CCache()
+        cred = Credential()
+        cred["server"] = Principal()
+        cred["server"].fromPrincipal(types.Principal(cached_spn, type=PrincipalNameType.NT_SRV_INST.value))
+        ccache.credentials.append(cred)
+
+        # Exact same 3-part SPN -> should match
+        self.assertIsNotNone(ccache.getCredential(cached_spn))
+
+        # Short hostname request for the same host -> should match
+        self.assertIsNotNone(ccache.getCredential("LDAP/DC01/CHILD-A.LOCAL@{}".format(realm)))
+
+        # Same short hostname, different child domain -> must not match
+        self.assertIsNone(ccache.getCredential("LDAP/DC01.CHILD-B.LOCAL/CHILD-B.LOCAL@{}".format(realm)))
+
+    @staticmethod
+    def _ccache_with(*spns):
+        ccache = CCache()
+        for spn in spns:
+            cred = Credential()
+            cred["server"] = Principal()
+            cred["server"].fromPrincipal(types.Principal(spn, type=PrincipalNameType.NT_SRV_INST.value))
+            ccache.credentials.append(cred)
+        return ccache
+
+    def test_ccache_getInterRealmTGT(self):
+        # A ccache holding only krbtgt/TARGET@SOURCE must be usable, impacket used to ignore it
+        referral = self._ccache_with("krbtgt/FOREST.LOCAL@{}".format(self.domain))
+        # Issued by the client realm for the foreign one -> returned for the client realm
+        self.assertIsNotNone(referral.getInterRealmTGT(self.domain))
+        self.assertIsNotNone(referral.getInterRealmTGT(self.domain.lower()))
+        # The foreign realm is the service, not the issuer -> no referral TGT there
+        self.assertIsNone(referral.getInterRealmTGT("FOREST.LOCAL"))
+
+        # A same-realm TGT is not an inter-realm TGT
+        self.assertIsNone(self._ccache_with(self.server).getInterRealmTGT(self.domain))
+        # A service ticket is not a TGT
+        self.assertIsNone(self._ccache_with("cifs/dc01.{}@{}".format(self.domain.lower(), self.domain)).getInterRealmTGT(self.domain))
+
+    def test_ccache_getInterRealmTGT_picks_the_target_realm(self):
+        spns = ["krbtgt/FOREST.LOCAL@{}".format(self.domain), "krbtgt/CHILD-A.LOCAL@{}".format(self.domain)]
+
+        for ccache in (self._ccache_with(*spns), self._ccache_with(*reversed(spns))):
+            # The target realm decides, whatever the order the credentials are cached in
+            self.assertEqual(ccache.getInterRealmTGT(self.domain, "forest.local")["server"].prettyPrint(),
+                             "krbtgt/FOREST.LOCAL@{}".format(self.domain).encode())
+            # Without a usable hint the choice must still be stable, not cache-order dependent
+            self.assertEqual(ccache.getInterRealmTGT(self.domain)["server"].prettyPrint(),
+                             ccache.getInterRealmTGT(self.domain, "UNKNOWN.LOCAL")["server"].prettyPrint())
 
 
 if __name__ == "__main__":
