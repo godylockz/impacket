@@ -9,7 +9,7 @@ Upstream is slow to merge. This tree starts from `fortra/impacket` master and ca
 
 This forks is maintained for Exegol. Do not open feature PRs against Fortra here; open them upstream and they can be pulled on the next fork refresh.
 
-Base: [`40b1eb7a`](https://github.com/fortra/impacket/commit/40b1eb7a) (PKINIT client, fortra/impacket#2260).
+Base: [`691fc183`](https://github.com/fortra/impacket/commit/691fc183) (non-ASCII ccache principal encoding, fortra/impacket#2377).
 
 PRs added
 ---------
@@ -61,7 +61,6 @@ Links go to the original Fortra PRs.
 ### SMB / DCERPC / WMI / other library
 
 * [fortra/impacket#2220](https://github.com/fortra/impacket/pull/2220) SMB 3.0.2 dialect
-* [fortra/impacket#2339](https://github.com/fortra/impacket/pull/2339) SMB2/3 SPNEGO mechListMIC
 * [fortra/impacket#2302](https://github.com/fortra/impacket/pull/2302) Stop leaking client OS/hostname
 * [fortra/impacket#2297](https://github.com/fortra/impacket/pull/2297) SMB2 high-latency read timeout
 * [fortra/impacket#2280](https://github.com/fortra/impacket/pull/2280) SMB share type reporting
