@@ -1,4 +1,5 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
+# -- coding: utf-8 --
 # Impacket - Collection of Python classes for working with network protocols.
 #
 # Copyright Fortra, LLC and its affiliated companies 
@@ -29,65 +30,69 @@
 #   ImpactDecoder
 #
 
+# Imports
+import argparse
 import select
 import socket
 import time
-import sys
 
 from impacket import ImpactDecoder, ImpactPacket
 
-if len(sys.argv) < 3:
-    print("Use: %s <src ip> <dst ip>" % sys.argv[0])
-    sys.exit(1)
 
-src = sys.argv[1]
-dst = sys.argv[2]
+def main(argv=None):
+    parser = argparse.ArgumentParser(description='Send ICMP echo requests using a raw socket.')
+    parser.add_argument('src', help='source IPv4 address')
+    parser.add_argument('dst', help='destination IPv4 address')
+    options = parser.parse_args(argv)
 
-# Create a new IP packet and set its source and destination addresses.
+    # Create a new IP packet and set its source and destination addresses.
+    ip = ImpactPacket.IP()
+    ip.set_ip_src(options.src)
+    ip.set_ip_dst(options.dst)
 
-ip = ImpactPacket.IP()
-ip.set_ip_src(src)
-ip.set_ip_dst(dst)
+    # Create a new ICMP packet of type ECHO.
+    icmp = ImpactPacket.ICMP()
+    icmp.set_icmp_type(icmp.ICMP_ECHO)
 
-# Create a new ICMP packet of type ECHO.
+    # Include a 156-character long payload inside the ICMP packet.
+    icmp.contains(ImpactPacket.Data(b"A" * 156))
 
-icmp = ImpactPacket.ICMP()
-icmp.set_icmp_type(icmp.ICMP_ECHO)
+    # Have the IP packet contain the ICMP packet (along with its payload).
+    ip.contains(icmp)
 
-# Include a 156-character long payload inside the ICMP packet.
-icmp.contains(ImpactPacket.Data(b"A"*156))
+    # Open a raw socket. Special permissions are usually required.
+    raw_socket = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_ICMP)
+    raw_socket.setsockopt(socket.IPPROTO_IP, socket.IP_HDRINCL, 1)
 
-# Have the IP packet contain the ICMP packet (along with its payload).
-ip.contains(icmp)
+    seq_id = 0
+    while True:
+        # Give the ICMP packet the next ID in the sequence.
+        seq_id += 1
+        icmp.set_icmp_id(seq_id)
 
-# Open a raw socket. Special permissions are usually required.
-s = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_ICMP)
-s.setsockopt(socket.IPPROTO_IP, socket.IP_HDRINCL, 1)
+        # Calculate its checksum.
+        icmp.set_icmp_cksum(0)
+        icmp.auto_checksum = 1
 
-seq_id = 0
-while 1:
-    # Give the ICMP packet the next ID in the sequence.
-    seq_id += 1
-    icmp.set_icmp_id(seq_id)
+        # Send it to the target host.
+        raw_socket.sendto(ip.get_packet(), (options.dst, 0))
 
-    # Calculate its checksum.
-    icmp.set_icmp_cksum(0)
-    icmp.auto_checksum = 1
+        # Wait for incoming replies.
+        if raw_socket in select.select([raw_socket], [], [], 1)[0]:
+            reply = raw_socket.recvfrom(2000)[0]
 
-    # Send it to the target host.
-    s.sendto(ip.get_packet(), (dst, 0))
+            # Use ImpactDecoder to reconstruct the packet hierarchy.
+            rip = ImpactDecoder.IPDecoder().decode(reply)
+            # Extract the ICMP packet from its container (the IP packet).
+            ricmp = rip.child()
 
-    # Wait for incoming replies.
-    if s in select.select([s], [], [], 1)[0]:
-       reply = s.recvfrom(2000)[0]
+            # If the packet matches, report it to the user.
+            if (rip.get_ip_dst() == options.src and rip.get_ip_src() == options.dst
+                    and icmp.ICMP_ECHOREPLY == ricmp.get_icmp_type()):
+                print("Ping reply for sequence #%d" % ricmp.get_icmp_id())
 
-       # Use ImpactDecoder to reconstruct the packet hierarchy.
-       rip = ImpactDecoder.IPDecoder().decode(reply)
-       # Extract the ICMP packet from its container (the IP packet).
-       ricmp = rip.child()
+            time.sleep(1)
 
-       # If the packet matches, report it to the user.
-       if rip.get_ip_dst() == src and rip.get_ip_src() == dst and icmp.ICMP_ECHOREPLY == ricmp.get_icmp_type():
-           print("Ping reply for sequence #%d" % ricmp.get_icmp_id())
 
-       time.sleep(1)
+if __name__ == '__main__':
+    main()

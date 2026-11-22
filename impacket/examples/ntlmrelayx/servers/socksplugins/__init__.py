@@ -8,16 +8,23 @@
 # of the Apache Software License. See the accompanying LICENSE file
 # for more information.
 #
-import os
+# Imports
 import sys
-from importlib.resources import files
 
 SOCKS_RELAYS = set()
+SOCKS_PLUGIN_MODULES = (
+    'http',
+    'https',
+    'imap',
+    'imaps',
+    'ldap',
+    'ldaps',
+    'mssql',
+    'smb',
+    'smtp',
+)
 
-socksplugins_path = files('impacket.examples.ntlmrelayx.servers').joinpath('socksplugins')
-for file in [f.name for f in socksplugins_path.iterdir() if f.is_file()]:
-    if file.find('__') >= 0 or file.endswith('.py') is False:
-        continue
+for module_name in SOCKS_PLUGIN_MODULES:
     # This seems to be None in some case (py3 only)
     # __spec__ is py3 only though, but I haven't seen this being None on py2
     # so it should cover all cases.
@@ -25,7 +32,7 @@ for file in [f.name for f in socksplugins_path.iterdir() if f.is_file()]:
         package = __spec__.name  # Python 3
     except NameError:
         package = __package__    # Python 2
-    __import__(package + '.' + os.path.splitext(file)[0])
-    module = sys.modules[package + '.' + os.path.splitext(file)[0]]
+    __import__(package + '.' + module_name)
+    module = sys.modules[package + '.' + module_name]
     pluginClass = getattr(module, getattr(module, 'PLUGIN_CLASS'))
     SOCKS_RELAYS.add(pluginClass)

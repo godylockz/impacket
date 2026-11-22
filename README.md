@@ -11,6 +11,23 @@ This fork is maintained for Exegol. Do not open feature PRs against Fortra here;
 
 Base: [`691fc183`](https://github.com/fortra/impacket/commit/691fc183) (non-ASCII ccache principal encoding, fortra/impacket#2377).
 
+Portable builds
+---------------
+
+The `Portable builds` workflow creates self-contained onedir bundles for Linux x86_64 (glibc 2.28 or newer) and Windows x86_64. Extract the archive before running it; the bundles do not use a temporary extraction directory.
+
+Both platforms use the same multicall interface:
+
+```console
+impacket --list
+impacket secretsdump --help
+impacket GetUserSPNs --help
+```
+
+On Windows, invoke `impacket.exe`. Commands are case-insensitive. The deprecated `sniff` and `split` examples are not packaged because they require the optional native `pcapy` dependency. `impacket --self-test` validates the bundled scripts, runtime dependencies, and the complete `ntlmrelayx` client, attack, and SOCKS plugin registries.
+
+Pull requests build and smoke-test every packaged command on both platforms. Tags matching `portable-v*` publish both archives and `SHA256SUMS` to a GitHub release.
+
 PRs added
 ---------
 
