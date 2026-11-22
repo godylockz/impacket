@@ -1,4 +1,5 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
+# -- coding: utf-8 --
 # Impacket - Collection of Python classes for working with network protocols.
 #
 # Copyright Fortra, LLC and its affiliated companies 
@@ -26,55 +27,67 @@
 #   ImpactDecoder
 #
 
+# Imports
+import argparse
 from select import select
 import socket
-import sys
 
 from impacket import ImpactDecoder
 
 DEFAULT_PROTOCOLS = ('icmp', 'tcp', 'udp')
 
-if len(sys.argv) == 1:
-    toListen = DEFAULT_PROTOCOLS
-    print("Using default set of protocols. A list of protocols can be supplied from the command line, eg.: %s <proto1> [proto2] ..." % sys.argv[0])
-else:
-    toListen = sys.argv[1:]
 
-# Open one socket for each specified protocol.
-# A special option is set on the socket so that IP headers are included with
-# the returned data.
-sockets = []
-for protocol in toListen:
-    try:
-        protocol_num = socket.getprotobyname(protocol)
-    except socket.error:
-        print("Ignoring unknown protocol:", protocol)
-        toListen.remove(protocol)
-        continue
-    s = socket.socket(socket.AF_INET, socket.SOCK_RAW, protocol_num)
-    s.setsockopt(socket.IPPROTO_IP, socket.IP_HDRINCL, 1)
-    sockets.append(s)
+def main(argv=None):
+    parser = argparse.ArgumentParser(description='Listen for IP packets using raw sockets.')
+    parser.add_argument('protocol', nargs='*', help='protocol name, such as icmp, tcp, or udp')
+    options = parser.parse_args(argv)
 
-if 0 == len(toListen):
-    print("There are no protocols available.")
-    sys.exit(0)
+    if options.protocol:
+        requested_protocols = options.protocol
+    else:
+        requested_protocols = list(DEFAULT_PROTOCOLS)
+        print("Using default set of protocols. A list of protocols can be supplied from the command line.")
 
-print("Listening on protocols:", toListen)
+    # Open one socket for each specified protocol.
+    # A special option is set on the socket so that IP headers are included with
+    # the returned data.
+    sockets = []
+    active_protocols = []
+    for protocol in requested_protocols:
+        try:
+            protocol_num = socket.getprotobyname(protocol)
+        except socket.error:
+            print("Ignoring unknown protocol:", protocol)
+            continue
+        raw_socket = socket.socket(socket.AF_INET, socket.SOCK_RAW, protocol_num)
+        raw_socket.setsockopt(socket.IPPROTO_IP, socket.IP_HDRINCL, 1)
+        sockets.append(raw_socket)
+        active_protocols.append(protocol)
 
-# Instantiate an IP packets decoder.
-# As all the packets include their IP header, that decoder only is enough.
-decoder = ImpactDecoder.IPDecoder()
+    if not sockets:
+        print("There are no protocols available.")
+        return
 
-while len(sockets) > 0:
-    # Wait for an incoming packet on any socket.
-    ready = select(sockets, [], [])[0]
-    for s in ready:
-        packet = s.recvfrom(4096)[0]
-        if 0 == len(packet):
-            # Socket remotely closed. Discard it.
-            sockets.remove(s)
-            s.close()
-        else:
-            # Packet received. Decode and display it.
-            packet = decoder.decode(packet)
-            print(packet)
+    print("Listening on protocols:", active_protocols)
+
+    # Instantiate an IP packets decoder.
+    # As all the packets include their IP header, that decoder only is enough.
+    decoder = ImpactDecoder.IPDecoder()
+
+    while sockets:
+        # Wait for an incoming packet on any socket.
+        ready = select(sockets, [], [])[0]
+        for raw_socket in ready:
+            packet = raw_socket.recvfrom(4096)[0]
+            if not packet:
+                # Socket remotely closed. Discard it.
+                sockets.remove(raw_socket)
+                raw_socket.close()
+            else:
+                # Packet received. Decode and display it.
+                packet = decoder.decode(packet)
+                print(packet)
+
+
+if __name__ == '__main__':
+    main()

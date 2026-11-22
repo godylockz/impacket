@@ -15,12 +15,24 @@
 # Author:
 #   Alberto Solino (@agsolino)
 #
-import os, sys
-from importlib.resources import files
+# Imports
+import sys
 from threading import Lock
+
 from impacket import LOG
 
 PROTOCOL_CLIENTS = {}
+CLIENT_PLUGIN_MODULES = (
+    'dcsyncclient',
+    'httprelayclient',
+    'imaprelayclient',
+    'ldaprelayclient',
+    'mssqlrelayclient',
+    'rpcrelayclient',
+    'smbrelayclient',
+    'smtprelayclient',
+    'winrmrelayclient',
+)
 
 # Base class for Protocol Clients for different protocols (SMB, MSSQL, etc)
 # Besides using this base class you need to define one global variable when
@@ -105,10 +117,7 @@ class ProtocolClient:
             self.client_id = client_idx
 
 
-clients_path = files('impacket.examples.ntlmrelayx').joinpath('clients')
-for file in [f.name for f in clients_path.iterdir() if f.is_file()]:
-    if file.find('__') >= 0 or file.endswith('.py') is False:
-        continue
+for module_name in CLIENT_PLUGIN_MODULES:
     # This seems to be None in some case (py3 only)
     # __spec__ is py3 only though, but I haven't seen this being None on py2
     # so it should cover all cases.
@@ -116,8 +125,8 @@ for file in [f.name for f in clients_path.iterdir() if f.is_file()]:
         package = __spec__.name  # Python 3
     except NameError:
         package = __package__    # Python 2
-    __import__(package + '.' + os.path.splitext(file)[0])
-    module = sys.modules[package + '.' + os.path.splitext(file)[0]]
+    __import__(package + '.' + module_name)
+    module = sys.modules[package + '.' + module_name]
     try:
         pluginClasses = set()
         try:

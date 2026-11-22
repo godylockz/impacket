@@ -1,0 +1,8 @@
+-r ../requirements.txt
+
+dnspython==2.9.2
+pip-audit==2.10.1
+pyasyncore==1.0.5
+pyinstaller==6.22.3
+pyinstaller-hooks-contrib==2026.10
+PySocks==1.7.1

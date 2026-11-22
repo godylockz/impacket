@@ -1,0 +1,149 @@
+name: Portable builds
+
+on:
+  pull_request:
+  push:
+    branches:
+      - master
+    tags:
+      - 'portable-v*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: portable-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PORTABLE_PYTHON_VERSION: '3.13.15'
+  PIP_DISABLE_PIP_VERSION_CHECK: '1'
+
+jobs:
+  linux:
+    name: Linux x86_64 (glibc 2.28+)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Build and smoke-test in pinned manylinux image
+        shell: bash
+        run: |
+          docker run --rm \
+            --user "$(id -u):$(id -g)" \
+            --env HOME=/tmp \
+            --env PIP_DISABLE_PIP_VERSION_CHECK=1 \
+            --env PORTABLE_PYTHON_VERSION \
+            --env UV_PYTHON_INSTALL_DIR=/tmp/uv-python \
+            --volume "$PWD:/work" \
+            --workdir /work \
+            quay.io/pypa/manylinux_2_28_x86_64@sha256:55a36963bc0504cdf004011001c1072306402f0b8b83be5a5eba7068f93eec53 \
+            /bin/bash -euxo pipefail -c '
+              /opt/python/cp313-cp313/bin/python -m venv /tmp/uv-bootstrap-venv
+              source /tmp/uv-bootstrap-venv/bin/activate
+              python -m pip install --require-hashes -r portable/bootstrap.lock
+              uv python install "${PORTABLE_PYTHON_VERSION:-3.13.15}"
+              managed_python="$(uv python find "${PORTABLE_PYTHON_VERSION:-3.13.15}")"
+              "$managed_python" -m venv /tmp/impacket-portable-venv
+              source /tmp/impacket-portable-venv/bin/activate
+              python -m pip install --require-hashes -r portable/requirements.lock
+              python -m pip install --no-deps .
+              python -m pip_audit --requirement portable/bootstrap.lock --require-hashes --disable-pip --strict
+              python -m pip_audit --requirement portable/requirements.lock --require-hashes --disable-pip --strict
+              python -m unittest tests.test_portable_cli
+              python portable/build.py
+              python portable/smoke_test.py --executable dist/portable/impacket/impacket
+              python portable/check_glibc.py --root dist/portable/impacket --maximum 2.28
+              export SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)"
+              python portable/archive.py \
+                --input dist/portable/impacket \
+                --output dist/releases/impacket-portable-linux-x86_64-glibc.tar.gz \
+                --root-name impacket-portable-linux-x86_64-glibc
+            '
+
+      - name: Upload Linux archive
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: impacket-portable-linux-x86_64-glibc
+          path: dist/releases/impacket-portable-linux-x86_64-glibc.tar.gz
+          if-no-files-found: error
+          retention-days: 14
+
+  windows:
+    name: Windows x86_64
+    runs-on: windows-2022
+    timeout-minutes: 30
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: ${{ env.PORTABLE_PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: portable/requirements.lock
+
+      - name: Install audited dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --require-hashes -r portable/requirements.lock
+          python -m pip install --no-deps .
+          python -m pip_audit --requirement portable/requirements.lock --require-hashes --disable-pip --strict
+
+      - name: Run portable unit tests
+        run: python -m unittest tests.test_portable_cli
+
+      - name: Build and smoke-test Windows bundle
+        shell: pwsh
+        run: |
+          python portable/build.py
+          python portable/smoke_test.py --executable dist/portable/impacket/impacket.exe
+          $env:SOURCE_DATE_EPOCH = git log -1 --format=%ct
+          python portable/archive.py `
+            --input dist/portable/impacket `
+            --output dist/releases/impacket-portable-windows-x86_64.zip `
+            --root-name impacket-portable-windows-x86_64
+
+      - name: Upload Windows archive
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: impacket-portable-windows-x86_64
+          path: dist/releases/impacket-portable-windows-x86_64.zip
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    name: Publish tagged release
+    if: startsWith(github.ref, 'refs/tags/portable-v')
+    needs:
+      - linux
+      - windows
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download release archives
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: release
+          merge-multiple: true
+
+      - name: Create checksums
+        working-directory: release
+        run: sha256sum *.tar.gz *.zip > SHA256SUMS
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          mapfile -t files < <(find release -maxdepth 1 -type f -print | sort)
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" "${files[@]}" --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" "${files[@]}" --verify-tag --generate-notes
+          fi

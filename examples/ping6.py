@@ -1,4 +1,5 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
+# -- coding: utf-8 --
 # Impacket - Collection of Python classes for working with network protocols.
 #
 # Copyright Fortra, LLC and its affiliated companies 
@@ -28,61 +29,66 @@
 #   ImpactDecoder
 #
 
+# Imports
+import argparse
 import select
 import socket
 import time
-import sys
 
 from impacket import ImpactDecoder, IP6, ICMP6, version
 
-print(version.BANNER)
 
-if len(sys.argv) < 3:
-    print("Use: %s <src ip> <dst ip>" % sys.argv[0])
-    sys.exit(1)
+def main(argv=None):
+    parser = argparse.ArgumentParser(description='Send ICMPv6 echo requests using a raw socket.')
+    parser.add_argument('src', help='source IPv6 address')
+    parser.add_argument('dst', help='destination IPv6 address')
+    options = parser.parse_args(argv)
 
-src = sys.argv[1]
-dst = sys.argv[2]
+    print(version.BANNER)
 
-# Create a new IP packet and set its source and destination addresses.
+    # Create a new IP packet and set its source and destination addresses.
+    ip = IP6.IP6()
+    ip.set_ip_src(options.src)
+    ip.set_ip_dst(options.dst)
+    ip.set_traffic_class(0)
+    ip.set_flow_label(0)
+    ip.set_hop_limit(64)
 
-ip = IP6.IP6()
-ip.set_ip_src(src)
-ip.set_ip_dst(dst)
-ip.set_traffic_class(0)
-ip.set_flow_label(0)
-ip.set_hop_limit(64)
+    # Open a raw socket. Special permissions are usually required.
+    raw_socket = socket.socket(socket.AF_INET6, socket.SOCK_RAW, socket.IPPROTO_ICMPV6)
 
-# Open a raw socket. Special permissions are usually required.
-s = socket.socket(socket.AF_INET6, socket.SOCK_RAW, socket.IPPROTO_ICMPV6)
+    payload = b"A" * 156
 
-payload = b"A"*156
+    print("PING %s %d data bytes" % (options.dst, len(payload)))
+    seq_id = 0
+    while True:
+        # Give the ICMP packet the next ID in the sequence.
+        seq_id += 1
+        icmp = ICMP6.ICMP6.Echo_Request(1, seq_id, payload)
 
-print("PING %s %d data bytes" % (dst, len(payload)))
-seq_id = 0
-while 1:
-    # Give the ICMP packet the next ID in the sequence.
-    seq_id += 1
-    icmp = ICMP6.ICMP6.Echo_Request(1, seq_id, payload)
+        # Have the IP packet contain the ICMP packet (along with its payload).
+        ip.contains(icmp)
+        ip.set_next_header(ip.child().get_ip_protocol_number())
+        ip.set_payload_length(ip.child().get_size())
+        icmp.calculate_checksum()
 
-    # Have the IP packet contain the ICMP packet (along with its payload).
-    ip.contains(icmp)
-    ip.set_next_header(ip.child().get_ip_protocol_number())
-    ip.set_payload_length(ip.child().get_size())
-    icmp.calculate_checksum()
+        # Send it to the target host.
+        raw_socket.sendto(icmp.get_packet(), (options.dst, 0))
 
-    # Send it to the target host.
-    s.sendto(icmp.get_packet(), (dst, 0))
+        # Wait for incoming replies.
+        if raw_socket in select.select([raw_socket], [], [], 1)[0]:
+            reply = raw_socket.recvfrom(2000)[0]
 
-    # Wait for incoming replies.
-    if s in select.select([s], [], [], 1)[0]:
-        reply = s.recvfrom(2000)[0]
+            # Use ImpactDecoder to reconstruct the packet hierarchy.
+            rip = ImpactDecoder.ICMP6Decoder().decode(reply)
 
-        # Use ImpactDecoder to reconstruct the packet hierarchy.
-        rip = ImpactDecoder.ICMP6Decoder().decode(reply)
+            # If the packet matches, report it to the user.
+            if ICMP6.ICMP6.ECHO_REPLY == rip.get_type():
+                print("%d bytes from %s: icmp_seq=%d "
+                      % (rip.child().get_size() - 4, options.dst, rip.get_echo_sequence_number()))
 
-        # If the packet matches, report it to the user.
-        if ICMP6.ICMP6.ECHO_REPLY == rip.get_type():
-            print("%d bytes from %s: icmp_seq=%d " % (rip.child().get_size()-4, dst, rip.get_echo_sequence_number()))
+            time.sleep(1)
 
-        time.sleep(1)
+
+if __name__ == '__main__':
+    main()

@@ -48,10 +48,10 @@ if __name__ == '__main__':
     parser.add_argument('-debug', action='store_true', help='Turn DEBUG output ON')
     parser.add_argument('-ts', action='store_true', help='Adds timestamp to every logging output')
     
-    parser.add_argument('jd', action='store', help='Class name of HKLM\SYSTEM\CurrentControlSet\Control\Lsa\JD')
-    parser.add_argument('skew1', action='store', help='Class name of HKLM\SYSTEM\CurrentControlSet\Control\Lsa\Skew1')
-    parser.add_argument('gbg', action='store', help='Class name of HKLM\SYSTEM\CurrentControlSet\Control\Lsa\GBG')
-    parser.add_argument('data', action='store', help='Class name of HKLM\SYSTEM\CurrentControlSet\Control\Lsa\Data')
+    parser.add_argument('jd', action='store', help=r'Class name of HKLM\SYSTEM\CurrentControlSet\Control\Lsa\JD')
+    parser.add_argument('skew1', action='store', help=r'Class name of HKLM\SYSTEM\CurrentControlSet\Control\Lsa\Skew1')
+    parser.add_argument('gbg', action='store', help=r'Class name of HKLM\SYSTEM\CurrentControlSet\Control\Lsa\GBG')
+    parser.add_argument('data', action='store', help=r'Class name of HKLM\SYSTEM\CurrentControlSet\Control\Lsa\Data')
 
     if len(sys.argv)==1:
         parser.print_help()

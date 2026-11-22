@@ -1,4 +1,5 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
+# -- coding: utf-8 --
 # Impacket - Collection of Python classes for working with network protocols.
 #
 # Copyright (C) 2024 Fortra. All rights reserved.
@@ -23,6 +24,7 @@
 #   the secretsdump and winregistry packages. (both by @agsolino)
 #
 
+# Imports
 import sys
 import codecs
 import argparse
@@ -61,10 +63,6 @@ if __name__ == '__main__':
     parser.add_argument('-ts', action='store_true', help='Adds timestamp to every logging output')
 
 
-    if len(sys.argv) < 4:
-        parser.print_help()
-        sys.exit(1)
-    
     options = parser.parse_args()
 
     logger.init(options.ts)
