@@ -7,7 +7,7 @@ This is [ThePorgs](https://github.com/ThePorgs/Impacket)'s fork of [fortra/impac
 
 Upstream is slow to merge. This tree starts from `fortra/impacket` master and carries selected open PRs, one commit per PR, original authors kept. Conflicts were resolved here when needed. This fork is to be considered bleeding-edge, and AI was heavily used to select, merge and resolve conflicts. This means that this fork is to be considered less stable than origin.
 
-This forks is maintained for Exegol. Do not open feature PRs against Fortra here; open them upstream and they can be pulled on the next fork refresh.
+This fork is maintained for Exegol. Do not open feature PRs against Fortra here; open them upstream and they can be pulled on the next fork refresh.
 
 Base: [`691fc183`](https://github.com/fortra/impacket/commit/691fc183) (non-ASCII ccache principal encoding, fortra/impacket#2377).
 
@@ -32,6 +32,7 @@ Links go to the original Fortra PRs.
 * [fortra/impacket#2240](https://github.com/fortra/impacket/pull/2240) `rpcclient.py`
 * [fortra/impacket#1994](https://github.com/fortra/impacket/pull/1994) `adidns.py` + `impacket/dnsp.py`
 * [fortra/impacket#2033](https://github.com/fortra/impacket/pull/2033) `winrmexec.py` + `impacket/winrm.py`
+* [fortra/impacket#2361](https://github.com/fortra/impacket/pull/2361) `ipp_coerce.py` + MS-RPRN opnum 88
 
 ### ntlmrelayx / LDAP attacks
 
@@ -41,6 +42,8 @@ Links go to the original Fortra PRs.
 * [fortra/impacket#1154](https://github.com/fortra/impacket/pull/1154) ACL attack: allow computer accounts
 * [fortra/impacket#2328](https://github.com/fortra/impacket/pull/2328) Shadow credentials improvements
 * [fortra/impacket#2287](https://github.com/fortra/impacket/pull/2287) HTTP SOCKS relay body corruption fix
+* [fortra/impacket#2365](https://github.com/fortra/impacket/pull/2365) LDAP signing bypass `--add-computer`
+* [fortra/impacket#2382](https://github.com/fortra/impacket/pull/2382) WinRM absolute-form requests are not treated as proxy
 
 ### Kerberos / tickets
 
@@ -77,6 +80,13 @@ Links go to the original Fortra PRs.
 * [fortra/impacket#2349](https://github.com/fortra/impacket/pull/2349) lookupsid `-lookup-domain` / `-lookup-name`
 * [fortra/impacket#1698](https://github.com/fortra/impacket/pull/1698) secretsdump `-inline` / `-restore` (ported onto current secretsdump)
 * [fortra/impacket#2336](https://github.com/fortra/impacket/pull/2336) Wait for RemoteRegistry instead of sleep(1)
+* [fortra/impacket#2378](https://github.com/fortra/impacket/pull/2378) secretsdump `-just-dc-user` with VSS
+* [fortra/impacket#2380](https://github.com/fortra/impacket/pull/2380) smbserver SMB2 ERROR replies
+* [fortra/impacket#2381](https://github.com/fortra/impacket/pull/2381) smbserver EOF via ftruncate
+* [fortra/impacket#2368](https://github.com/fortra/impacket/pull/2368) winregistry findKey on keys without subkeys
+* [fortra/impacket#2362](https://github.com/fortra/impacket/pull/2362) ESE fixed-column null bitmap
+* [fortra/impacket#2358](https://github.com/fortra/impacket/pull/2358) LDAP filter `\XX` escapes as octets
+* [fortra/impacket#2356](https://github.com/fortra/impacket/pull/2356) setup.py version string vs git signature output
 
 Upstream Impacket
 =================

@@ -1,3 +1,5 @@
+#!/usr/bin/env python3
+# -- coding: utf-8 --
 # Impacket - Collection of Python classes for working with network protocols.
 #
 # Copyright Fortra, LLC and its affiliated companies 
@@ -357,6 +359,9 @@ class saveRegistryParser(Registry):
         return None
 
     def __findSubKey(self, parentKey, subKey):
+        # Keys without subkeys have OffsetSubKeyLf set to -1 (0xffffffff)
+        if parentKey['NumSubKeys'] == 0 or parentKey['OffsetSubKeyLf'] < 0:
+            return None
         lf = self.__getBlock(parentKey['OffsetSubKeyLf'])
         if lf is not None:
             data = lf['HashRecords']

@@ -1,3 +1,5 @@
+#!/usr/bin/env python3
+# -- coding: utf-8 --
 # Impacket - Collection of Python classes for working with network protocols.
 #
 # Copyright Fortra, LLC and its affiliated companies 
@@ -282,7 +284,6 @@ class LDAPAttack(ProtocolAttack):
         Add a new user. Parent is preferably CN=Users,DC=Domain,DC=local, but can
         also be an OU or other container where we have write privileges
         """
-        global alreadyEscalated
         if alreadyEscalated:
             LOG.error('New user already added. Refusing to add another')
             return
@@ -441,7 +442,6 @@ class LDAPAttack(ProtocolAttack):
         return
 
     def delegateAttack(self, usersam, targetsam, domainDumper, sid):
-        global delegatePerformed
         if targetsam in delegatePerformed:
             LOG.info('Delegate attack already performed for this computer, skipping')
             return

@@ -1,3 +1,5 @@
+#!/usr/bin/env python3
+# -- coding: utf-8 --
 # Impacket - Collection of Python classes for working with network protocols.
 #
 # Copyright Fortra, LLC and its affiliated companies 
@@ -66,7 +68,7 @@ from impacket.nt_errors import STATUS_NO_MORE_FILES, STATUS_NETWORK_NAME_DELETED
     STATUS_FILE_IS_A_DIRECTORY, STATUS_NOT_IMPLEMENTED, STATUS_INVALID_HANDLE, STATUS_OBJECT_NAME_COLLISION, \
     STATUS_NO_SUCH_FILE, STATUS_CANCELLED, STATUS_OBJECT_NAME_NOT_FOUND, STATUS_SUCCESS, STATUS_ACCESS_DENIED, \
     STATUS_NOT_SUPPORTED, STATUS_INVALID_DEVICE_REQUEST, STATUS_FS_DRIVER_REQUIRED, STATUS_INVALID_INFO_CLASS, \
-    STATUS_LOGON_FAILURE, STATUS_OBJECT_PATH_SYNTAX_BAD, STATUS_END_OF_FILE
+    STATUS_LOGON_FAILURE, STATUS_OBJECT_PATH_SYNTAX_BAD, STATUS_END_OF_FILE, STATUS_BUFFER_OVERFLOW
 
 # Setting LOG to current's module name
 LOG = logging.getLogger(__name__)
@@ -932,9 +934,8 @@ class TRANS2Commands:
                 elif informationLevel == smb.SMB_SET_FILE_END_OF_FILE_INFO:
                     fileHandle = connData['OpenedFiles'][setFileInfoParameters['FID']]['FileHandle']
                     infoRecord = smb.SMBSetFileEndOfFileInfo(data)
-                    if infoRecord['EndOfFile'] > 0:
-                        os.lseek(fileHandle, infoRecord['EndOfFile'] - 1, 0)
-                        os.write(fileHandle, b'\x00')
+                    # set the file size to EndOfFile: truncate or extend with zeros, keeping existing contents
+                    os.ftruncate(fileHandle, infoRecord['EndOfFile'])
                 else:
                     smbServer.log('Unknown level for set file info! 0x%x' % setFileInfoParameters['InformationLevel'],
                                   logging.ERROR, connData=connData)
@@ -3542,6 +3543,9 @@ class SMB2Commands:
         respSMBCommand['Capabilities'] = 0
         respSMBCommand['MaximalAccess'] = 0x000f01ff
 
+        if errorCode != STATUS_SUCCESS:
+            # [MS-SMB2] 3.3.4.4: failed requests must be answered with an SMB2 ERROR Response
+            respSMBCommand = smb2.SMB2Error()
         respPacket['Data'] = respSMBCommand
 
         # Sign the packet if needed
@@ -3910,9 +3914,8 @@ class SMB2Commands:
                     elif informationLevel == smb2.SMB2_FILE_END_OF_FILE_INFO:
                         fileHandle = connData['OpenedFiles'][fileID]['FileHandle']
                         infoRecord = smb.SMBSetFileEndOfFileInfo(setInfo['Buffer'])
-                        if infoRecord['EndOfFile'] > 0:
-                            os.lseek(fileHandle, infoRecord['EndOfFile'] - 1, 0)
-                            os.write(fileHandle, b'\x00')
+                        # set the file size to EndOfFile: truncate or extend with zeros, keeping existing contents
+                        os.ftruncate(fileHandle, infoRecord['EndOfFile'])
                     elif informationLevel == smb2.SMB2_FILE_RENAME_INFO:
                         renameInfo = smb2.FILE_RENAME_INFORMATION_TYPE_2(setInfo['Buffer'])
                         newFileName = normalize_path(renameInfo['FileName'].decode('utf-16le'))
@@ -5191,6 +5194,12 @@ class SMBSERVER(socketserver.ThreadingMixIn, socketserver.TCPServer):
                             respPacket['SessionID'] = packet['SessionID']
                         respPacket['MessageID'] = packet['MessageID']
                         respPacket['TreeID'] = packet['TreeID']
+                        if errorCode not in (STATUS_SUCCESS, STATUS_MORE_PROCESSING_REQUIRED, STATUS_BUFFER_OVERFLOW) \
+                                and not isinstance(respCommand, smb2.SMB2Error):
+                            # [MS-SMB2] 3.3.4.4: failed requests must be answered with an SMB2 ERROR Response
+                            # (StructureSize 9) instead of the command's own (empty) response structure.
+                            # Strict clients like libsmb2 fail to parse it and drop the connection otherwise.
+                            respCommand = smb2.SMB2Error()
                         if hasattr(respCommand, 'getData'):
                             respPacket['Data'] = respCommand.getData()
                         else:

@@ -1,4 +1,5 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
+# -- coding: utf-8 --
 # Impacket - Collection of Python classes for working with network protocols.
 #
 # Copyright Fortra, LLC and its affiliated companies
@@ -9,6 +10,7 @@
 # of the Apache Software License. See the accompanying LICENSE file
 # for more information.
 
+import os
 import unittest
 from contextlib import redirect_stdout
 from io import StringIO
@@ -47,6 +49,17 @@ class WinRegistryTests(unittest.TestCase):
             exportRegistryParser.printValue(None, REG_MULTISZ, b"\x00\x00")
 
         self.assertEqual(output.getvalue(), "NULL\n")
+
+    def test_save_registry_find_key_below_key_without_subkeys_returns_none(self):
+        hive = os.path.join(os.path.dirname(__file__), "..", "data", "secretsdump_local_SYSTEM")
+        registry = saveRegistryParser(hive)
+        try:
+            # 'Select' has no subkeys (OffsetSubKeyLf == -1)
+            self.assertIsNotNone(registry.findKey("Select"))
+            self.assertIsNone(registry.findKey("Select\\Missing"))
+            self.assertIsNone(registry.getValue("Select\\Missing\\default"))
+        finally:
+            registry.close()
 
 
 if __name__ == "__main__":

@@ -1,4 +1,5 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
+# -- coding: utf-8 --
 # Impacket - Collection of Python classes for working with network protocols.
 #
 # Copyright Fortra, LLC and its affiliated companies 
@@ -15,30 +16,44 @@
 import glob
 import os
 import platform
+import subprocess
 
 from setuptools import setup
-from subprocess import *
 
 PACKAGE_NAME = "impacket"
+PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 
 VER_MAJOR = 0
 VER_MINOR = 14
 VER_MAINT = 0
 VER_PREREL = "dev"
 try:
-    if call(["git", "branch"], stderr=STDOUT, stdout=open(os.devnull, 'w')) == 0:
-        p = Popen("git log -1 --format=%cd --date=format:%Y%m%d.%H%M%S", shell=True, stdin=PIPE, stderr=PIPE, stdout=PIPE)
-        (outstr, __) = p.communicate()
-        (VER_CDATE,VER_CTIME) = outstr.strip().decode("utf-8").split('.')
+    subprocess.run(
+        ["git", "branch"],
+        check=True,
+        cwd=PROJECT_ROOT,
+        stderr=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+    )
+    git_date = subprocess.run(
+        ["git", "log", "-1", "--no-show-signature", "--format=%cd", "--date=format:%Y%m%d.%H%M%S"],
+        check=True,
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+    )
+    VER_CDATE, VER_CTIME = git_date.stdout.strip().split('.')
 
-        p = Popen("git rev-parse --short HEAD", shell=True, stdin=PIPE, stderr=PIPE, stdout=PIPE)
-        (outstr, __) = p.communicate()
-        VER_CHASH = outstr.strip().decode("utf-8")
-
-        VER_LOCAL = "+{}.{}.{}".format(VER_CDATE, VER_CTIME, VER_CHASH)
-    else:
-        VER_LOCAL = ""
-except Exception:
+    git_hash = subprocess.run(
+        ["git", "rev-parse", "--short", "HEAD"],
+        check=True,
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+    )
+    VER_CHASH = git_hash.stdout.strip()
+    VER_LOCAL = "+{}.{}.{}".format(VER_CDATE, VER_CTIME, VER_CHASH)
+except (OSError, subprocess.CalledProcessError, ValueError):
     VER_LOCAL = ""
 
 if platform.system() != 'Darwin':
@@ -48,7 +63,7 @@ else:
 
 
 def read(fname):
-    return open(os.path.join(os.path.dirname(__file__), fname)).read()
+    return open(os.path.join(PROJECT_ROOT, fname)).read()
 
 
 setup(

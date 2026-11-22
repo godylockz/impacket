@@ -1,3 +1,5 @@
+#!/usr/bin/env python3
+# -- coding: utf-8 --
 # Impacket - Collection of Python classes for working with network protocols.
 #
 # Copyright Fortra, LLC and its affiliated companies 
@@ -59,7 +61,6 @@ class FSRVPTests(DCERPCTests):
         self.assertEqual(resp['MaxVersion'], 1)
 
     def test_fsrvp(self):
-        global SHARE_NAME
         # All test are passed in one function because almost all functions depend on each other and must be called sequentially.
         dce, transport = self.connect()
         # Shadow copy preparation
@@ -92,7 +93,6 @@ class FSRVPTests(DCERPCTests):
         delete_share_mapping = fsrvp.hDeleteShareMapping(dce, shadow_copy_set_id, shadow_copy_id, f'\\\\{machine_name}\\{SHARE_NAME}')
 
     def test_abort_shadow_copy(self):
-        global SHARE_NAME
         dce, transport = self.connect()
         is_path_supported = fsrvp.hIsPathSupported(dce, r"\\%s\%s" % (self.machine, SHARE_NAME))
         self.assertEqual(is_path_supported["SupportedByThisProvider"], 1)
